@@ -549,13 +549,14 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 		                 ( r_preferOpenGLES->integer == -1 && profileMask == SDL_GL_CONTEXT_PROFILE_ES ) );
 
 		if ( preferOpenGLES ) {
-#ifdef __EMSCRIPTEN__
-			// WebGL 2.0 isn't fully backward compatible so you have to ask for it specifically
+			// ES 3 has to be asked for by name. WebGL 2.0 isn't fully backward
+			// compatible, and EGL hands back a real ES 2.0 context when that is
+			// what was requested - so asking for 2.0 first would settle for it
+			// even where 3 is available.
 			contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
 			contexts[numContexts].majorVersion = 3;
 			contexts[numContexts].minorVersion = 0;
 			numContexts++;
-#endif
 
 			contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
 			contexts[numContexts].majorVersion = 2;
@@ -574,12 +575,10 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 		numContexts++;
 
 		if ( !preferOpenGLES ) {
-#ifdef __EMSCRIPTEN__
 			contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
 			contexts[numContexts].majorVersion = 3;
 			contexts[numContexts].minorVersion = 0;
 			numContexts++;
-#endif
 
 			contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
 			contexts[numContexts].majorVersion = 2;
@@ -1088,7 +1087,12 @@ void GLimp_Init( qboolean fixedFunction )
 	r_sdlDriver = ri.Cvar_Get( "r_sdlDriver", "", CVAR_ROM );
 	r_allowResize = ri.Cvar_Get( "r_allowResize", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_centerWindow = ri.Cvar_Get( "r_centerWindow", "0", CVAR_ARCHIVE | CVAR_LATCH );
+#ifdef __ANDROID__
+	// There is no desktop GL to fall back to, so don't leave it to detection
+	r_preferOpenGLES = ri.Cvar_Get( "r_preferOpenGLES", "1", CVAR_ARCHIVE | CVAR_LATCH );
+#else
 	r_preferOpenGLES = ri.Cvar_Get( "r_preferOpenGLES", "-1", CVAR_ARCHIVE | CVAR_LATCH );
+#endif
 
 	if( ri.Cvar_VariableIntegerValue( "com_abnormalExit" ) )
 	{

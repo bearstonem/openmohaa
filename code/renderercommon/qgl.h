@@ -49,7 +49,6 @@ extern void (APIENTRYP qglUnlockArraysEXT) (void);
 #define QGL_1_1_PROCS \
 	GLE(void, BindTexture, GLenum target, GLuint texture) \
 	GLE(void, BlendFunc, GLenum sfactor, GLenum dfactor) \
-	GLE(void, CallList, GLuint list) \
 	GLE(void, ClearColor, GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha) \
 	GLE(void, Clear, GLbitfield mask) \
 	GLE(void, ClearStencil, GLint s) \
@@ -62,21 +61,17 @@ extern void (APIENTRYP qglUnlockArraysEXT) (void);
 	GLE(void, Disable, GLenum cap) \
 	GLE(void, DrawArrays, GLenum mode, GLint first, GLsizei count) \
 	GLE(void, DrawElements, GLenum mode, GLsizei count, GLenum type, const GLvoid *indices) \
-	GLE(void, DrawPixels, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) \
 	GLE(void, Enable, GLenum cap) \
 	GLE(void, Finish, void) \
 	GLE(void, Flush, void) \
 	GLE(void, Fogf, GLenum pname, GLfloat param) \
 	GLE(void, Fogfv, GLenum pname, const GLfloat *params) \
-	GLE(void, Fogi, GLenum pname, GLint param) \
 	GLE(void, GenTextures, GLsizei n, GLuint *textures ) \
 	GLE(void, GetBooleanv, GLenum pname, GLboolean *params) \
 	GLE(GLenum, GetError, void) \
 	GLE(void, GetIntegerv, GLenum pname, GLint *params) \
 	GLE(const GLubyte *, GetString, GLenum name) \
-	GLE(void, LineStipple, GLint factor, GLushort pattern) \
 	GLE(void, LineWidth, GLfloat width) \
-	GLE(void, PixelZoom, GLfloat xfactor, GLfloat yfactor) \
 	GLE(void, PolygonOffset, GLfloat factor, GLfloat units) \
 	GLE(void, ReadPixels, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels) \
 	GLE(void, Scissor, GLint x, GLint y, GLsizei width, GLsizei height) \
@@ -108,10 +103,22 @@ extern void (APIENTRYP qglUnlockArraysEXT) (void);
 	GLE(void, VertexPointer, GLint size, GLenum type, GLsizei stride, const GLvoid *ptr) \
 
 // OpenGL 1.0/1.1 and 3.2 core profile but not OpenGL ES 1.x
+//
+// CallList, DrawPixels, Fogi, LineStipple and PixelZoom exist in no version of
+// OpenGL ES. They belong here rather than in QGL_1_1_PROCS: that list is shared
+// with the ES paths, and requiring them there makes GLimp_GetProcAddresses fail
+// on any ES context, which is what kept the GL2 renderer from starting on
+// Android. Only renderergl1 calls them - every use in renderergl2 is inside an
+// "#if 0 // FIXME: unimplemented (GL2)".
 #define QGL_DESKTOP_1_1_PROCS \
+	GLE(void, CallList, GLuint list) \
 	GLE(void, ClearDepth, GLclampd depth) \
 	GLE(void, DepthRange, GLclampd near_val, GLclampd far_val) \
 	GLE(void, DrawBuffer, GLenum mode) \
+	GLE(void, DrawPixels, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *pixels) \
+	GLE(void, Fogi, GLenum pname, GLint param) \
+	GLE(void, LineStipple, GLint factor, GLushort pattern) \
+	GLE(void, PixelZoom, GLfloat xfactor, GLfloat yfactor) \
 	GLE(void, PolygonMode, GLenum face, GLenum mode) \
 
 // OpenGL 1.0/1.1 but not OpenGL 3.2 core profile or OpenGL ES 1.x
