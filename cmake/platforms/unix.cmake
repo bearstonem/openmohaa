@@ -6,7 +6,10 @@ endif()
 
 list(APPEND SYSTEM_PLATFORM_SOURCES ${SOURCE_DIR}/sys/sys_unix.c)
 
-if(EMSCRIPTEN)
+if(ANDROID)
+    # No tty; the console goes to logcat
+    list(APPEND SYSTEM_PLATFORM_SOURCES ${SOURCE_DIR}/sys/con_android.c)
+elseif(EMSCRIPTEN)
     list(APPEND SYSTEM_PLATFORM_SOURCES ${SOURCE_DIR}/sys/con_passive.c)
 else()
     list(APPEND SYSTEM_PLATFORM_SOURCES ${SOURCE_DIR}/sys/con_tty.c)
@@ -21,7 +24,12 @@ list(APPEND COMMON_LIBRARIES
     m                   # Math library
 )
 
-list(APPEND SYSTEM_PLATFORM_SOURCES ${SOURCE_DIR}/sys/new/sys_unix_new.c)
+if(ANDROID)
+    # bionic has no <execinfo.h>, so the backtrace is walked differently
+    list(APPEND SYSTEM_PLATFORM_SOURCES ${SOURCE_DIR}/sys/new/sys_android_new.c)
+else()
+    list(APPEND SYSTEM_PLATFORM_SOURCES ${SOURCE_DIR}/sys/new/sys_unix_new.c)
+endif()
 
 find_package(Threads)
 list(APPEND COMMON_LIBRARIES ${CMAKE_DL_LIBS} ${CMAKE_THREAD_LIBS_INIT})

@@ -48,6 +48,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "sys_local.h"
 #include "sys_loadlib.h"
 
+#ifdef __ANDROID__
+#include "sys_android.h"
+#endif
+
 #include "../qcommon/q_shared.h"
 #include "../qcommon/qcommon.h"
 
@@ -835,6 +839,14 @@ int main( int argc, char **argv )
 	Sys_SetBinaryPath( Sys_Dirname( argv[ 0 ] ) );
 	Sys_SetDefaultInstallPath( DEFAULT_BASEDIR );
 
+#ifdef __ANDROID__
+	// There is no meaningful binary path on Android - argv[0] is "app_process"
+	// and the process starts in "/". Point the engine at the app's own external
+	// files directory instead, which is where the user side-loads the game data
+	// and the only place it can also write.
+	Sys_AndroidSetupPaths();
+#endif
+
 	// Concatenate the command line for passing to Com_Init
 	for( i = 1; i < argc; i++ )
 	{
@@ -875,15 +887,19 @@ int main( int argc, char **argv )
 #endif
 
 	CON_Init( );
-	Com_Init( commandLine );
-	Sys_InitEx(); // Added in OPM
-	NET_Init( );
 
+	// Installed before Com_Init rather than after it: startup is exactly when
+	// renderer and filesystem bring-up crash on a new platform, and a fault
+	// there used to die with no backtrace at all.
 	signal( SIGILL, Sys_SigHandler );
 	signal( SIGFPE, Sys_SigHandler );
 	signal( SIGSEGV, Sys_SigHandler );
 	signal( SIGTERM, Sys_SigHandler );
 	signal( SIGINT, Sys_SigHandler );
+
+	Com_Init( commandLine );
+	Sys_InitEx(); // Added in OPM
+	NET_Init( );
 
 #ifdef __EMSCRIPTEN__
 	emscripten_set_main_loop( Com_Frame, 0, 1 );

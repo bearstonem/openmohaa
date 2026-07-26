@@ -1,6 +1,6 @@
 # Linux-like specific settings, i.e. including FreeBSD etc.
 
-if(NOT UNIX OR APPLE)
+if(NOT UNIX OR APPLE OR ANDROID)
     return()
 endif()
 

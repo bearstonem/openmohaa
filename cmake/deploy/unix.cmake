@@ -1,5 +1,5 @@
 
-if(NOT APPLE)
+if(NOT APPLE AND NOT ANDROID)
     # Configure the .desktop entries with the arch suffix
     configure_file(
     misc/linux/org.openmoh.openmohaa.desktop.in

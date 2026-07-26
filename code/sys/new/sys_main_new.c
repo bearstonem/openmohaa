@@ -32,6 +32,15 @@ static void* clipboard_text = NULL;
 
 static void* game_library = NULL;
 static void* cgame_library = NULL;
+
+#ifdef __ANDROID__
+// The modules ship inside the APK, where they sit on the loader's own search
+// path rather than beside a binary or under fs_basepath.
+#define GAME_MODULE_USE_SYSTEM_PATH qtrue
+#else
+#define GAME_MODULE_USE_SYSTEM_PATH qfalse
+#endif
+
 qboolean	GLimp_SpawnRenderThread(void (*function)(void))
 {
     return qfalse;
@@ -238,12 +247,12 @@ Sys_GetGameAPI
 void* Sys_GetGameAPI(void* parms)
 {
     void* (*GetGameAPI) (void*);
-    const char* gamename = "game" DLL_SUFFIX DLL_EXT;
+    const char* gamename = DLL_PREFIX "game" DLL_SUFFIX DLL_EXT;
 
     if (game_library)
         Com_Error(ERR_FATAL, "Sys_GetGameAPI without calling Sys_UnloadGame");
 
-    game_library = Sys_LoadDll(gamename, qfalse);
+    game_library = Sys_LoadDll(gamename, GAME_MODULE_USE_SYSTEM_PATH);
 
     //Still couldn't find it.
     if (!game_library) {
@@ -287,12 +296,12 @@ Sys_GetCGameAPI
 void* Sys_GetCGameAPI(void* parms)
 {
     void* (*GetCGameAPI) (void*);
-    const char* gamename = "cgame" DLL_SUFFIX DLL_EXT;
+    const char* gamename = DLL_PREFIX "cgame" DLL_SUFFIX DLL_EXT;
 
     if (cgame_library)
         Com_Error(ERR_FATAL, "Sys_GetCGameAPI without calling Sys_UnloadCGame");
 
-    cgame_library = Sys_LoadDll(gamename, qfalse);
+    cgame_library = Sys_LoadDll(gamename, GAME_MODULE_USE_SYSTEM_PATH);
 
     //Still couldn't find it.
     if (!cgame_library) {

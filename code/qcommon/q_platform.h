@@ -84,6 +84,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define DLL_SUFFIX
 #endif
 
+#if defined(__ANDROID__)
+// Android only extracts lib*.so out of an APK, so the game modules carry the
+// prefix and are then found on the loader's own search path.
+#define DLL_PREFIX "lib"
+#else
+#define DLL_PREFIX
+#endif
+
 #if defined(TARGET_LOCAL_SYSTEM)
 #  define ARCH_SUFFIX
 #elif defined(TARGET_MULTIPLE_ARCHITECTURES)

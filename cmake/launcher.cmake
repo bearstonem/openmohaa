@@ -1,3 +1,9 @@
+if(ANDROID)
+    # The launcher picks a game binary to exec; on Android the activity is
+    # the entry point instead.
+    return()
+endif()
+
 set(LAUNCHER_SOURCES "${SOURCE_DIR}/Launcher/launch_main.cpp")
 
 if (WIN32)

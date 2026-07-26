@@ -42,7 +42,6 @@ set(CLIENT_SOURCES
     ${SOURCE_DIR}/client/cl_uisoundpicker.cpp
     ${SOURCE_DIR}/client/cl_uistd.cpp
     ${SOURCE_DIR}/client/cl_uiview3d.cpp
-    ${SOURCE_DIR}/client/libmumblelink.c
     ${SOURCE_DIR}/client/qal.c
     ${SOURCE_DIR}/client/snd_codec_mp3.c
     ${SOURCE_DIR}/client/snd_codec_ogg.c
@@ -106,7 +105,15 @@ list(APPEND CLIENT_BINARY_SOURCES
     ${ASM_SOURCES}
     ${CLIENT_LIBRARY_SOURCES})
 
-add_executable(${CLIENT_BINARY} ${CLIENT_EXECUTABLE_OPTIONS} ${CLIENT_BINARY_SOURCES})
+if(ANDROID)
+    # SDLActivity dlopen()s the engine and calls SDL_main, so the client is a
+    # shared library rather than an executable. It also has to carry the lib
+    # prefix: the package manager only extracts lib*.so out of an APK.
+    add_library(${CLIENT_BINARY} SHARED ${CLIENT_BINARY_SOURCES})
+    set_target_properties(${CLIENT_BINARY} PROPERTIES PREFIX ${ANDROID_APK_LIBRARY_PREFIX})
+else()
+    add_executable(${CLIENT_BINARY} ${CLIENT_EXECUTABLE_OPTIONS} ${CLIENT_BINARY_SOURCES})
+endif()
 
 target_include_directories(     ${CLIENT_BINARY} PRIVATE ${CLIENT_INCLUDE_DIRS})
 target_include_directories(     ${CLIENT_BINARY} PRIVATE ${SOURCE_DIR}/client)

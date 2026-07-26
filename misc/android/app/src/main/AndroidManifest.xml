@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:installLocation="auto">
+
+    <!-- renderergl2 is driven as GLES 3; renderergl1 is not built for Android -->
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <!-- The Touch controllers arrive as a game controller -->
+    <uses-feature
+        android:name="android.hardware.gamepad"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
+
+    <!-- Multiplayer, and the master server browser -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+        Game data lives in the app's own external files directory, which needs
+        no permission. The user side-loads main/pak*.pk3 into it; no assets are
+        shipped with the app.
+    -->
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:hardwareAccelerated="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+        <activity
+            android:name=".OpenMoHAAActivity"
+            android:label="@string/app_name"
+            android:alwaysRetainTaskState="true"
+            android:launchMode="singleInstance"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:preferMinimalPostProcessing="true"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--
+                Phase 3 adds the OpenXR session. That is also when this activity
+                gains <category android:name="com.oculus.intent.category.VR" />
+                and the headtracking uses-feature, which together make the Quest
+                launch it as an immersive app rather than a 2D panel.
+            -->
+        </activity>
+    </application>
+
+</manifest>
