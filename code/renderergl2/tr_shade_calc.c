@@ -372,12 +372,25 @@ static void AutospriteDeform( void ) {
 	tess.numIndexes = 0;
 	tess.firstIndex = 0;
 
-	if ( backEnd.currentEntity != &tr.worldEntity ) {
-		GlobalVectorToLocal( backEnd.viewParms.ori.axis[1], leftDir );
-		GlobalVectorToLocal( backEnd.viewParms.ori.axis[2], upDir );
-	} else {
-		VectorCopy( backEnd.viewParms.ori.axis[1], leftDir );
-		VectorCopy( backEnd.viewParms.ori.axis[2], upDir );
+	{
+		vec3_t viewLeft, viewUp;
+
+		VectorCopy( backEnd.viewParms.ori.axis[1], viewLeft );
+		VectorCopy( backEnd.viewParms.ori.axis[2], viewUp );
+
+		if ( vrView.active ) {
+			// World up, so the sprites stay upright rather than inheriting the
+			// head's roll.
+			VectorSet( viewUp, 0.0f, 0.0f, 1.0f );
+		}
+
+		if ( backEnd.currentEntity != &tr.worldEntity ) {
+			GlobalVectorToLocal( viewLeft, leftDir );
+			GlobalVectorToLocal( viewUp, upDir );
+		} else {
+			VectorCopy( viewLeft, leftDir );
+			VectorCopy( viewUp, upDir );
+		}
 	}
 
 	for ( i = 0 ; i < oldVerts ; i+=4 ) {
@@ -392,8 +405,36 @@ static void AutospriteDeform( void ) {
 		VectorSubtract( xyz, mid, delta );
 		radius = VectorLength( delta ) * 0.707f;		// / sqrt(2)
 
+		// Quake's autosprites align to the view plane: every sprite takes the
+		// camera's own axes, so they all sit parallel to the screen. On a
+		// monitor that is indistinguishable from facing the viewer, but in VR
+		// turning the head swings the whole set round to stay parallel to the
+		// view plane, and they visibly spin in place. Point each one at where
+		// the viewer actually is instead, so head rotation leaves them alone
+		// and only moving changes what they present.
+		if ( vrView.active ) {
+			vec3_t toViewer, spriteLeft, spriteUp;
+
+			VectorSubtract( backEnd.ori.viewOrigin, mid, toViewer );
+			CrossProduct( upDir, toViewer, spriteLeft );
+
+			// Degenerate directly above or below the sprite, where there is no
+			// heading to align to; the shared axes are as good as anything.
+			if ( VectorNormalize( spriteLeft ) > 0.001f ) {
+				CrossProduct( toViewer, spriteLeft, spriteUp );
+
+				if ( VectorNormalize( spriteUp ) > 0.001f ) {
+					VectorScale( spriteLeft, radius, left );
+					VectorScale( spriteUp, radius, up );
+					goto haveAxes;
+				}
+			}
+		}
+
 		VectorScale( leftDir, radius, left );
 		VectorScale( upDir, radius, up );
+
+	haveAxes:
 
 		if ( backEnd.viewParms.isMirror ) {
 			VectorSubtract( vec3_origin, left, left );

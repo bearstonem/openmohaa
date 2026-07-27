@@ -122,6 +122,28 @@ void RB_DrawSprite( const refSprite_t *spr ) {
 		}
         break;
     case SPRITE_PARALLEL:
+		// In VR, face where the viewer is rather than lying parallel to the
+		// view plane. Parallel to the view plane means every sprite in the
+		// world swings round together the moment the head turns, which is
+		// invisible on a monitor and glaring in a headset.
+		if (vrView.active) {
+			vec3_t toViewer;
+
+			VectorSubtract(backEnd.viewParms.ori.origin, spr->origin, toViewer);
+
+			if (VectorNormalize(toViewer) > 0.001f) {
+				vec3_t worldUp = { 0.0f, 0.0f, 1.0f };
+
+				CrossProduct(worldUp, toViewer, right);
+
+				if (VectorNormalize(right) > 0.001f) {
+					CrossProduct(toViewer, right, up);
+					VectorNormalize(up);
+					break;
+				}
+			}
+		}
+
 		VectorCopy(backEnd.viewParms.ori.axis[2], up);
 		if (!backEnd.viewParms.isMirror) {
 			VectorNegate(backEnd.viewParms.ori.axis[1], right);
@@ -144,8 +166,28 @@ void RB_DrawSprite( const refSprite_t *spr ) {
 		}
 
 		VectorSet(up, 0.0f, 0.0f, 1.0f);
-		VectorSet(right, backEnd.viewParms.ori.axis[0][1], -backEnd.viewParms.ori.axis[0][0], 0.0f);
-		VectorNormalize(right);
+
+		// Upright sprites already ignore the view's roll and pitch, but they
+		// still turn with the view's heading rather than towards the viewer -
+		// so in VR they spin in place as the head turns. Aim each one at where
+		// the viewer actually stands instead.
+		if (vrView.active) {
+			vec3_t toViewer;
+
+			VectorSubtract(backEnd.viewParms.ori.origin, spr->origin, toViewer);
+			toViewer[2] = 0.0f;
+
+			if (VectorNormalize(toViewer) > 0.001f) {
+				VectorSet(right, -toViewer[1], toViewer[0], 0.0f);
+			} else {
+				VectorSet(right, backEnd.viewParms.ori.axis[0][1], -backEnd.viewParms.ori.axis[0][0], 0.0f);
+				VectorNormalize(right);
+			}
+		} else {
+			VectorSet(right, backEnd.viewParms.ori.axis[0][1], -backEnd.viewParms.ori.axis[0][0], 0.0f);
+			VectorNormalize(right);
+		}
+
 		VectorSet(norm, -right[1], right[0], 0.0f);
 		break;
 	}
