@@ -442,6 +442,7 @@ to handle mirrors,
 void RE_RenderScene( const refdef_t *fd ) {
 	viewParms_t		parms;
 	int				startTime;
+	refdef_t		vrRefdef;
 
 	if ( !tr.registered ) {
 		return;
@@ -450,6 +451,15 @@ void RE_RenderScene( const refdef_t *fd ) {
 
 	if ( r_norefresh->integer ) {
 		return;
+	}
+
+	// Every camera the game has arrives here, so composing the head pose on at
+	// this point is what makes head tracking follow cutscenes and ladders as
+	// well as the player's own view. See R_ApplyVRView.
+	if ( vrView.active ) {
+		vrRefdef = *fd;
+		R_ApplyVRView( &vrRefdef );
+		fd = &vrRefdef;
 	}
 
 	startTime = ri.Milliseconds();

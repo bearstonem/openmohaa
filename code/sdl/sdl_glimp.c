@@ -301,11 +301,6 @@ static void *GLimp_GL4ES_GetProcAddress( const char *name ) {
 	return dlsym( gl4es, name );
 }
 
-// Extensions have to come from the same place as everything else, for the same
-// reason: the multitexture entry points below are the ones renderergl1 leans on
-// hardest, and gl4es has to see them.
-#define GLimp_GetExtensionProc( name ) GLimp_GL4ES_GetProcAddress( name )
-
 /*
 ===============
 GLimp_ExtensionSupported
@@ -339,9 +334,27 @@ static qboolean GLimp_ExtensionSupported( const char *extension ) {
 	return qfalse;
 }
 #else
-#define GLimp_GetExtensionProc( name ) SDL_GL_GetProcAddress( name )
 #define GLimp_ExtensionSupported( name ) SDL_GL_ExtensionSupported( name )
 #endif
+
+/*
+===============
+GLimp_GetProcAddress
+
+The renderer's one way of asking for a GL entry point, so that everything it
+calls comes from the same implementation. Everything above resolves through
+this, and so does anything a renderer needs to load for itself - renderergl1
+has no extension probe of its own and asks for the framebuffer entry points
+here.
+===============
+*/
+void *GLimp_GetProcAddress( const char *name ) {
+#ifdef USE_GL4ES
+	return GLimp_GL4ES_GetProcAddress( name );
+#else
+	return SDL_GL_GetProcAddress( name );
+#endif
+}
 
 /*
 ===============
@@ -1073,9 +1086,9 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 		{
 			if ( r_ext_multitexture->value )
 			{
-				qglMultiTexCoord2fARB = GLimp_GetExtensionProc( "glMultiTexCoord2fARB" );
-				qglActiveTextureARB = GLimp_GetExtensionProc( "glActiveTextureARB" );
-				qglClientActiveTextureARB = GLimp_GetExtensionProc( "glClientActiveTextureARB" );
+				qglMultiTexCoord2fARB = GLimp_GetProcAddress( "glMultiTexCoord2fARB" );
+				qglActiveTextureARB = GLimp_GetProcAddress( "glActiveTextureARB" );
+				qglClientActiveTextureARB = GLimp_GetProcAddress( "glClientActiveTextureARB" );
 
 				if ( qglActiveTextureARB )
 				{
@@ -1111,8 +1124,8 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 			if ( r_ext_compiled_vertex_array->value )
 			{
 				ri.Printf( PRINT_ALL, "...using GL_EXT_compiled_vertex_array\n" );
-				qglLockArraysEXT = ( void ( APIENTRY * )( GLint, GLint ) ) GLimp_GetExtensionProc( "glLockArraysEXT" );
-				qglUnlockArraysEXT = ( void ( APIENTRY * )( void ) ) GLimp_GetExtensionProc( "glUnlockArraysEXT" );
+				qglLockArraysEXT = ( void ( APIENTRY * )( GLint, GLint ) ) GLimp_GetProcAddress( "glLockArraysEXT" );
+				qglUnlockArraysEXT = ( void ( APIENTRY * )( void ) ) GLimp_GetProcAddress( "glUnlockArraysEXT" );
 				if (!qglLockArraysEXT || !qglUnlockArraysEXT)
 				{
 					ri.Error (ERR_FATAL, "bad getprocaddress");

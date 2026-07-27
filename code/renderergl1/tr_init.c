@@ -50,6 +50,11 @@ cvar_t	*r_skipBackEnd;
 cvar_t	*r_ignorehwgamma;
 cvar_t	*r_measureOverdraw;
 
+cvar_t	*r_vrTrace;
+cvar_t	*vr_fovZoom;
+cvar_t	*vr_hudScale;
+cvar_t	*vr_hudDepth;
+
 cvar_t	*r_inGameVideo;
 cvar_t	*r_fastsky;
 cvar_t	*r_fastdlights;
@@ -404,6 +409,15 @@ static int	s_numVidModes = ( sizeof( r_vidModes ) / sizeof( r_vidModes[0] ) );
 
 qboolean R_GetModeInfo( int *width, int *height, float *windowAspect, int mode ) {
 	vidmode_t	*vm;
+
+	// A headset dictates the render size; whatever r_mode says is irrelevant.
+	// Asked for directly rather than read from a cvar because r_mode is latched
+	// and is registered by this renderer, so a value the client sets beforehand
+	// is not in effect for the first mode change.
+	if ( ri.GetVRRenderResolution && ri.GetVRRenderResolution( width, height ) ) {
+		*windowAspect = (float)*width / (float)*height;
+		return qtrue;
+	}
 
 	if ( mode < -1 ) {
 		return qfalse;
@@ -1560,6 +1574,13 @@ void R_Register( void )
 
 	r_ext_multisample = ri.Cvar_Get("r_ext_multisample", "0", CVAR_ARCHIVE | CVAR_LATCH);
 	r_noborder = ri.Cvar_Get("r_noborder", "0", CVAR_ARCHIVE | CVAR_LATCH);
+	r_vrTrace = ri.Cvar_Get( "r_vrTrace", "0", 0 );
+	// Set by cgame from the fov the game asked for; see CG_CalcFov.
+	vr_fovZoom = ri.Cvar_Get( "vr_fovZoom", "1", 0 );
+	// See R_VRAdjust2DOrtho. Scale is the share of the display the HUD is drawn
+	// across; depth is how far out it is made to converge.
+	vr_hudScale = ri.Cvar_Get( "vr_hudScale", "0.55", CVAR_ARCHIVE );
+	vr_hudDepth = ri.Cvar_Get( "vr_hudDepth", "2.0", CVAR_ARCHIVE );
 	r_ext_texture_filter_anisotropic = ri.Cvar_Get("r_ext_texture_filter_anisotropic",
 		"0", CVAR_ARCHIVE | CVAR_LATCH);
 	r_stereoEnabled = ri.Cvar_Get("r_stereoEnabled", "0", CVAR_ARCHIVE | CVAR_LATCH);
@@ -1878,6 +1899,8 @@ refexport_t *GetRefAPI ( int apiVersion, refimport_t *rimp ) {
 
 	re.BeginFrame = RE_BeginFrame;
 	re.EndFrame = RE_EndFrame;
+	re.SetDefaultFramebuffer = RE_SetDefaultFramebuffer;
+	re.SetVRView = RE_SetVRView;
 
 	re.MarkFragments = R_MarkFragments;
 	re.LerpTag = R_LerpTag;

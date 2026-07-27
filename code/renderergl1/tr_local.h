@@ -1409,6 +1409,33 @@ typedef struct {
 	int farclip;
 } trGlobals_t;
 
+/*
+The eye currently being rendered, when driven by a headset.
+
+Kept outside trGlobals_t for the same reason as glState: it describes the
+display rather than the scene, and must survive a renderer re-init.
+*/
+typedef struct {
+	qboolean	active;
+	vec3_t		origin;		// head offset from the game's camera, engine units
+	vec3_t		axis[3];	// head orientation as forward/left/up
+	float		tanLeft;	// asymmetric frustum edges at unit distance
+	float		tanRight;
+	float		tanUp;
+	float		tanDown;
+	float		baseYaw;	// head heading the game's camera already carries
+	int			eye;		// which eye, for the HUD's stereo offset
+} vrViewState_t;
+
+extern vrViewState_t	vrView;
+
+void RE_SetVRView( const float *origin, const vec3_t *axis,
+			float tanLeft, float tanRight, float tanUp, float tanDown,
+			float baseYaw, int eye );
+void RE_SetDefaultFramebuffer( unsigned int framebuffer );
+void R_ApplyVRView( refdef_t *fd );
+void R_VRAdjust2DOrtho( float *left, float *right, float *bottom, float *top );
+
 extern backEndState_t	backEnd;
 extern trGlobals_t	tr;
 extern glconfig_t	glConfig;		// outside of TR since it shouldn't be cleared during ref re-init
@@ -1450,6 +1477,11 @@ extern cvar_t	*r_texturebits;			// number of desired texture bits
 										// all else = error
 
 extern cvar_t	*r_measureOverdraw;		// enables stencil buffer overdraw measurement
+
+extern cvar_t	*r_vrTrace;				// log the composed VR camera once a second
+extern cvar_t	*vr_fovZoom;			// scope magnification, published by cgame
+extern cvar_t	*vr_hudScale;			// how much of the display the HUD covers
+extern cvar_t	*vr_hudDepth;			// metres out the HUD is made to converge
 
 extern cvar_t	*r_lodscale;
 

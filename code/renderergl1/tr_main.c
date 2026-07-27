@@ -569,11 +569,40 @@ void R_SetupProjection( void ) {
 	zNear	= r_znear->value;
 	zFar	= tr.viewParms.zFar;
 
-	ymax = zNear * tan( tr.refdef.fov_y * M_PI / 360.0f );
-	ymin = -ymax;
+	if ( vrView.active ) {
+		// A headset's per-eye frustum is not centred on the view axis - each
+		// eye sees further towards its own side than towards the nose. Using a
+		// symmetric approximation misaligns the two images by a few degrees,
+		// which reads as an image the eyes cannot fuse. The matrix built below
+		// already carries the off-centre terms in its [8] and [9] elements, so
+		// the runtime's own edges go straight in.
+		//
+		// Scopes and binoculars. The game narrows its fov to zoom, but in a
+		// headset the frustum comes from the runtime, so that request would
+		// otherwise be dropped on the floor. Narrowing the eye frustum by the
+		// same factor while the composition layer keeps claiming the headset's
+		// full field of view leaves the compositor to magnify the result, which
+		// is both free and sharper than zooming after the fact: the narrow view
+		// was rendered into the whole eye texture.
+		float zoom = vr_fovZoom ? vr_fovZoom->value : 1.0f;
 
-	xmax = zNear * tan( tr.refdef.fov_x * M_PI / 360.0f );
-	xmin = -xmax;
+		if ( zoom < 1.0f ) {
+			zoom = 1.0f;
+		} else if ( zoom > 16.0f ) {
+			zoom = 16.0f;
+		}
+
+		xmin = zNear * vrView.tanLeft / zoom;
+		xmax = zNear * vrView.tanRight / zoom;
+		ymin = zNear * vrView.tanDown / zoom;
+		ymax = zNear * vrView.tanUp / zoom;
+	} else {
+		ymax = zNear * tan( tr.refdef.fov_y * M_PI / 360.0f );
+		ymin = -ymax;
+
+		xmax = zNear * tan( tr.refdef.fov_x * M_PI / 360.0f );
+		xmin = -xmax;
+	}
 
 	width = xmax - xmin;
 	height = ymax - ymin;

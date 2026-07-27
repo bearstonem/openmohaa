@@ -440,6 +440,11 @@ void Set2DWindow(int x, int y, int w, int h, float left, float right, float bott
 	qglScissor(x, y, w, h);
 	qglMatrixMode(GL_PROJECTION);
 	qglLoadIdentity();
+
+	// Everything 2D in this renderer comes through here, RB_SetGL2D included,
+	// so this is the one place the headset's correction has to be applied.
+	R_VRAdjust2DOrtho(&left, &right, &bottom, &top);
+
 	qglOrtho(left, right, bottom, top, n, f);
 	qglMatrixMode(GL_MODELVIEW);
 

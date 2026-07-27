@@ -183,6 +183,11 @@ void		GLimp_EndFrame( void );
 // shows up as flicker.
 void		GLimp_SetPresentsToWindow( qboolean presents );
 
+// The renderer's one way of asking for a GL entry point. Everything the
+// renderer calls has to come from the same implementation - see
+// GLimp_GL4ES_GetProcAddress for what goes wrong when it does not.
+void	   *GLimp_GetProcAddress( const char *name );
+
 void		GLimp_LogComment( char *comment );
 void		GLimp_Minimize(void);
 
