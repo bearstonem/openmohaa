@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_shade.c
 
 #include "tr_local.h"
+#include <dlfcn.h>
 
 /*
 
@@ -1526,6 +1527,53 @@ static void R_FlatColorPop( void )
 	qglEnableClientState( GL_COLOR_ARRAY );
 }
 
+
+/*
+===============
+R_DriverGet
+
+GL state as the *driver* sees it, not as gl4es reports it.
+
+gl4es answers glGetIntegerv for GL_CULL_FACE_MODE, GL_FRONT_FACE and
+GL_MODELVIEW_MATRIX out of its own tables (src/gl/getter.c), exactly as it
+answers glGetString from constants - the trap already recorded in section 5.5 of
+the handoff. So asking through qgl and comparing against the engine compares the
+engine with gl4es's copy of the engine, which agrees by construction and proves
+nothing. Two "GL and the engine agree" measurements in this session were that,
+and were worthless.
+
+gl4es also drops calls its cache considers redundant - glCullFace returns early
+when the mode matches (src/gl/face.c:14), as do glDepthMask, glDepthFunc,
+glBlendFunc, glColorMask, glScissor and glViewport. So the driver can be holding
+something the engine never asked for and gl4es will still report the engine's
+value back.
+
+These resolve straight out of libGLESv3, past gl4es entirely.
+===============
+*/
+static void (*driverGetIntegerv)(GLenum, GLint *);
+static GLboolean (*driverIsEnabled)(GLenum);
+
+static qboolean R_DriverGet( void )
+{
+	static qboolean tried;
+
+	if ( !tried ) {
+		void *lib = dlopen( "libGLESv3.so", RTLD_NOW | RTLD_LOCAL );
+
+		tried = qtrue;
+		if ( !lib ) {
+			lib = dlopen( "libGLESv2.so", RTLD_NOW | RTLD_LOCAL );
+		}
+		if ( lib ) {
+			driverGetIntegerv = dlsym( lib, "glGetIntegerv" );
+			driverIsEnabled   = dlsym( lib, "glIsEnabled" );
+		}
+	}
+
+	return driverGetIntegerv && driverIsEnabled;
+}
+
 /*
 ===============
 R_TraceSurface
@@ -1660,8 +1708,26 @@ static void R_TraceSurface( shaderCommands_t *input, const char *iter )
 				- m[4] * ( m[1] * m[10] - m[9] * m[2] )
 				+ m[8] * ( m[1] * m[6]  - m[5] * m[2] );
 
+			// The driver's own answer, next to gl4es's. If these disagree, the
+			// engine's request never reached the hardware and gl4es reported
+			// back what it was asked rather than what is set. A driver mode of
+			// 0x0408 (GL_FRONT_AND_BACK) would cull everything whichever face
+			// the engine names, while leaving two sided surfaces - which is the
+			// exact signature seen: world invisible with culling on either way,
+			// models unaffected because they are CT_TWO_SIDED.
+			if ( R_DriverGet() ) {
+				GLint drvMode = 0, drvFront = 0;
+
+				driverGetIntegerv( GL_CULL_FACE_MODE, &drvMode );
+				driverGetIntegerv( GL_FRONT_FACE, &drvFront );
+
+				ri.Printf( PRINT_ALL,
+					"  DRIVER: cullenabled %d cullmode 0x%04x frontface 0x%04x\n",
+					(int)driverIsEnabled( GL_CULL_FACE ), drvMode, drvFront );
+			}
+
 			ri.Printf( PRINT_ALL,
-				"  cull: GLenabled %d GLmode 0x%04x frontface 0x%04x | engine faceCulling %d cullType %d"
+				"  gl4es: GLenabled %d GLmode 0x%04x frontface 0x%04x | engine faceCulling %d cullType %d"
 				" | mvdet %.3f isMirror %d\n",
 				(int)cullOn, cullMode, frontFace,
 				glState.faceCulling,
