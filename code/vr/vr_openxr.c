@@ -543,11 +543,16 @@ static struct {
 	qboolean        stabiliseHeld;
 	qboolean        weaponStabilised;
 	XrAction        stabiliseAction;
+	XrAction        reloadAction;
+	qboolean        reloadWasDown;
+	qboolean        reloadRelease;
+	int             reloadPressedAt;
 } vr;
 
 static cvar_t *vr_traceTracking;
 static cvar_t *vr_traceFrame;
 static cvar_t *vr_captureEye;
+static cvar_t *vr_reloadTapMs;
 
 /*
 ==================
@@ -890,6 +895,9 @@ qboolean VR_Init(void)
 	// Dumps the left eye to main/vrshotN.tga every two seconds, so what the
 	// renderer produced can be looked at directly instead of described.
 	vr_captureEye = VR_TuningCvar("vr_captureEye", "0");
+	// How long the weapon hand grip may be held and still count as a tap
+	// for reload. The reference calls this vr_reloadtimeoutms.
+	vr_reloadTapMs = Cvar_Get("vr_reloadTapMs", "400", CVAR_ARCHIVE);
 	vr_traceTracking = Cvar_Get("vr_traceTracking", "0", 0);
 	// On by default while the frame budget is still an open question; there is
 	// no console in the headset to turn it on with when it is wanted.
@@ -1491,6 +1499,16 @@ static void VR_CreateActions(void)
 	memset(&actionInfo, 0, sizeof(actionInfo));
 	actionInfo.type = XR_TYPE_ACTION_CREATE_INFO;
 	actionInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+	Q_strncpyz(actionInfo.actionName, "reload", sizeof(actionInfo.actionName));
+	Q_strncpyz(actionInfo.localizedActionName, "Reload", sizeof(actionInfo.localizedActionName));
+
+	if (!XR_CHECK(xrCreateAction(vr.actionSet, &actionInfo, &vr.reloadAction))) {
+		return;
+	}
+
+	memset(&actionInfo, 0, sizeof(actionInfo));
+	actionInfo.type = XR_TYPE_ACTION_CREATE_INFO;
+	actionInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
 	Q_strncpyz(actionInfo.actionName, "stabilise", sizeof(actionInfo.actionName));
 	Q_strncpyz(actionInfo.localizedActionName, "Steady Weapon", sizeof(actionInfo.localizedActionName));
 
@@ -1623,12 +1641,13 @@ static void VR_CreateActions(void)
 				}
 
 				// The grips. The off hand's steadies the weapon - bringing the
-				// free hand up to the gun and squeezing is how a rifle is held,
-				// and it is what the reference binds it to. The weapon hand's
-				// keeps use, so reaching for a door handle with the grip still
-				// works with the hand that is already pointing at it.
+				// free hand up to the gun and squeezing is how a rifle is held.
+				// The weapon hand's reloads on a tap. Both are where the
+				// reference puts them, and use stays on the right stick click,
+				// which is where the reference has it too (+activate on
+				// ovrButton_Joystick).
 				Com_sprintf(path, sizeof(path), "/user/hand/%s/input/squeeze/value", hands[hand]);
-				bindings[count].action = (hand == 0) ? vr.stabiliseAction : vr.useAction;
+				bindings[count].action = (hand == 0) ? vr.stabiliseAction : vr.reloadAction;
 				if (XR_SUCCEEDED(xrStringToPath(vr.instance, path, &bindings[count].binding))) {
 					count++;
 				}
@@ -2157,6 +2176,44 @@ void VR_UpdateInput(void)
 	VR_UpdateHeldButton(vr.duckAction, &vr.duckWasDown, "+movedown\n", "-movedown\n");
 	VR_UpdateHeldButton(vr.useAction, &vr.useWasDown, "+use\n", "-use\n");
 
+	// Reload, on a tap of the weapon hand's grip. Held rather than tapped is
+	// the reference's weapon wheel, which this port does not have yet, so a
+	// long press simply does nothing rather than reloading late.
+	{
+		XrActionStateGetInfo getInfo;
+		XrActionStateBoolean state;
+		qboolean             down;
+		const int            now = Sys_Milliseconds();
+		const int            tapMs = (vr_reloadTapMs && vr_reloadTapMs->integer > 0)
+			? vr_reloadTapMs->integer : 400;
+
+		memset(&getInfo, 0, sizeof(getInfo));
+		getInfo.type = XR_TYPE_ACTION_STATE_GET_INFO;
+		getInfo.action = vr.reloadAction;
+
+		memset(&state, 0, sizeof(state));
+		state.type = XR_TYPE_ACTION_STATE_BOOLEAN;
+
+		down = (XR_SUCCEEDED(xrGetActionStateBoolean(vr.session, &getInfo, &state))
+			&& state.isActive && state.currentState) ? qtrue : qfalse;
+
+		if (down && !vr.reloadWasDown) {
+			vr.reloadPressedAt = now;
+		} else if (!down && vr.reloadWasDown) {
+			if (now - vr.reloadPressedAt < tapMs) {
+				Cbuf_AddText("+reload\n");
+				vr.reloadRelease = qtrue;
+			}
+		} else if (vr.reloadRelease) {
+			// A frame later, the way the reference does it: the game wants to
+			// see the key held for a tick before it is let go.
+			Cbuf_AddText("-reload\n");
+			vr.reloadRelease = qfalse;
+		}
+
+		vr.reloadWasDown = down;
+	}
+
 	// Not a command - nothing in the game knows about a two handed hold, it
 	// only changes where the weapon points, so it is read straight into the VR
 	// state and consumed in VR_GetInput.
@@ -2569,6 +2626,11 @@ void VR_DestroySession(void)
 			xrDestroySpace(vr.aimSpaces[i]);
 			vr.aimSpaces[i] = XR_NULL_HANDLE;
 		}
+	}
+
+	if (vr.reloadAction != XR_NULL_HANDLE) {
+		xrDestroyAction(vr.reloadAction);
+		vr.reloadAction = XR_NULL_HANDLE;
 	}
 
 	if (vr.stabiliseAction != XR_NULL_HANDLE) {
