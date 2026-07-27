@@ -1526,18 +1526,35 @@ CG_Draw2D
 */
 void CG_Draw2D(void)
 {
-    CG_UpdateCountdown();
-    CG_DrawZoomOverlay();
-    CG_DrawLagometer();
-    CG_HudDrawElements();
-    CG_DrawObjectives();
-    CG_DrawIcons();
-    CG_DrawStopwatch();
-    CG_DrawSpectatorView();
-    CG_DrawPlayerTeam();
-    CG_DrawPlayerEntInfo();
-    CG_UpdateAttackerDisplay();
-    CG_DrawVote();
-    CG_DrawInstantMessageMenu();
-    CG_DrawCrosshair();
+    //
+    // Added in OPM
+    //  In VR this is called twice with the frame split in half: once for the
+    //  panel on the player's wrist, and once more with the world, for the
+    //  couple of things that would be useless anywhere else. 0 is every flat
+    //  frame, where it is called once and draws the lot.
+    //
+    const int pass = vr_hudPass ? vr_hudPass->integer : 0;
+
+    if (pass != 2) {
+        CG_UpdateCountdown();
+        CG_DrawLagometer();
+        CG_HudDrawElements();
+        CG_DrawObjectives();
+        CG_DrawIcons();
+        CG_DrawStopwatch();
+        CG_DrawSpectatorView();
+        CG_DrawPlayerTeam();
+        CG_DrawPlayerEntInfo();
+        CG_UpdateAttackerDisplay();
+        CG_DrawVote();
+        CG_DrawInstantMessageMenu();
+    }
+
+    if (pass != 1) {
+        // The reticle is aimed at things out in the world and the scope
+        // surround has to sit around the magnified view, so both stay with the
+        // world rather than travelling to the wrist.
+        CG_DrawZoomOverlay();
+        CG_DrawCrosshair();
+    }
 }

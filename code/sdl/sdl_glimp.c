@@ -358,6 +358,37 @@ void *GLimp_GetProcAddress( const char *name ) {
 
 /*
 ===============
+GLimp_MakeCurrent
+
+Bind the window's GL context to the calling thread again.
+
+The VR layer hands the OpenXR session the EGL context the engine is already
+using, so it needs one to be current at the moment it asks. Whether it is
+depends on what SDL and the platform have done with the window since - a hidden
+window on Android has no surface to be current against yet, and being current
+is per thread in any case. Rather than assume, the session asks for it.
+
+Returns false if there is no context to bind, which is a different thing from
+failing to bind one.
+===============
+*/
+qboolean GLimp_MakeCurrent( void ) {
+	if ( !SDL_window || !SDL_glContext ) {
+		ri.Printf( PRINT_ALL, "GLimp_MakeCurrent: no window (%p) or context (%p)\n",
+			(void *)SDL_window, (void *)SDL_glContext );
+		return qfalse;
+	}
+
+	if ( SDL_GL_MakeCurrent( SDL_window, SDL_glContext ) < 0 ) {
+		ri.Printf( PRINT_ALL, "SDL_GL_MakeCurrent failed: %s\n", SDL_GetError() );
+		return qfalse;
+	}
+
+	return qtrue;
+}
+
+/*
+===============
 GLimp_GetProcAddresses
 
 Get addresses for OpenGL functions.
@@ -696,10 +727,37 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 			numContexts++;
 		}
 	} else {
+#ifdef USE_GL4ES
+		// The fixed function renderer asks for a fixed function context, and on
+		// this platform there is no such thing - the request fails at
+		// SDL_CreateWindow with "Couldn't get a visual" and takes the renderer
+		// down with it.
+		//
+		// gl4es is what makes the request answerable, and it wants the opposite
+		// of what the renderer thinks it is getting: it presents desktop GL 1.x
+		// upwards while running on OpenGL ES underneath. So ask for ES here.
+		// The renderer is never told - it reads its version through gl4es, which
+		// reports desktop GL, and GLimp_GetProcAddresses takes the desktop
+		// fixed function branch on the strength of it.
+		//
+		// ES 3 first and by name, for the reason given above: EGL hands back a
+		// real ES 2.0 context when 2.0 is what was asked for, so asking for it
+		// first would settle for it even where 3 is available.
+		contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
+		contexts[numContexts].majorVersion = 3;
+		contexts[numContexts].minorVersion = 0;
+		numContexts++;
+
+		contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
+		contexts[numContexts].majorVersion = 2;
+		contexts[numContexts].minorVersion = 0;
+		numContexts++;
+#else
 		contexts[numContexts].profileMask = 0;
 		contexts[numContexts].majorVersion = 1;
 		contexts[numContexts].minorVersion = 1;
 		numContexts++;
+#endif
 	}
 
 	for (i = 0; i < 16; i++)
@@ -840,6 +898,26 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 				ri.Printf( PRINT_ALL, "SDL_GL_CreateContext() for %s context failed: %s\n", contextName, SDL_GetError() );
 				continue;
 			}
+
+#ifdef USE_GL4ES
+			// The usual proof that a context is live is GL_VERSION coming back
+			// non-NULL from GLimp_GetProcAddresses below. That test does not
+			// work here: gl4es answers glGetString for VERSION, VENDOR and
+			// RENDERER out of its own constants, without asking the driver
+			// anything, so a context that was created but never bound sails
+			// through it and is only noticed much later - when the VR layer
+			// asks EGL for the current context and finds none.
+			if ( !SDL_GL_GetCurrentContext() )
+			{
+				ri.Printf( PRINT_ALL, "%s context was created but is not current: %s\n",
+					contextName, SDL_GetError() );
+				SDL_GL_DeleteContext( SDL_glContext );
+				SDL_glContext = NULL;
+				SDL_DestroyWindow( SDL_window );
+				SDL_window = NULL;
+				continue;
+			}
+#endif
 
 			if ( !GLimp_GetProcAddresses( fixedFunction ) )
 			{

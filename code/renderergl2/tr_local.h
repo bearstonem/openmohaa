@@ -2234,12 +2234,17 @@ typedef struct {
 	float		tanRight;
 	float		tanUp;
 	float		tanDown;
+	float		baseYaw;	// head heading the game's camera already carries
+	int			eye;		// which eye, for the HUD's stereo offset
 } vrViewState_t;
 
 extern vrViewState_t	vrView;
 
+void R_VRAdjust2DOrtho( float *left, float *right, float *bottom, float *top );
+
 void RE_SetVRView( const float *origin, const vec3_t *axis,
-			float tanLeft, float tanRight, float tanUp, float tanDown );
+			float tanLeft, float tanRight, float tanUp, float tanDown,
+			float baseYaw, int eye );
 
 extern backEndState_t	backEnd;
 extern trGlobals_t	tr;
@@ -2269,6 +2274,9 @@ extern cvar_t	*r_stereoSeparation;			// separation of cameras for stereo renderi
 extern cvar_t	*r_measureOverdraw;		// enables stencil buffer overdraw measurement
 
 extern cvar_t	*r_vrTrace;				// log the composed VR camera once a second
+extern cvar_t	*vr_fovZoom;			// scope magnification, published by cgame
+extern cvar_t	*vr_hudScale;			// how much of the display the HUD covers
+extern cvar_t	*vr_hudDepth;			// metres out the HUD is made to converge
 extern cvar_t	*r_lodbias;				// push/pull LOD transitions
 extern cvar_t	*r_lodscale;
 

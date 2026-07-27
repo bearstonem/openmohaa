@@ -406,6 +406,29 @@ typedef struct {
 
 extern clientStatic_t	cls;
 
+/*
+Which half of the frame is being drawn.
+
+In VR the world and the flat content that sits over it cannot share a pass. The
+world has to be drawn once per eye, from that eye's viewpoint; the HUD and the
+menus have to be drawn exactly once, flat, onto a panel the compositor places in
+the room - drawing them into the eye buffers instead leaves them with no stereo
+disparity while each eye still warps them through its own asymmetric frustum, so
+the two images never fuse. The screen space HUD looking wrong in a headset is
+the same problem the menus had before they moved to a quad.
+
+So a VR frame is three passes rather than two: the world into each eye, then the
+flat content into the panel. This says which one is running. VRDRAW_ALL is every
+non VR frame, where the two are drawn together as they always were.
+*/
+typedef enum {
+	VRDRAW_ALL,		// everything, in one pass - the flat path
+	VRDRAW_WORLD,	// the 3D scene only, once per eye
+	VRDRAW_PANEL	// the HUD and menus only, once, onto the wrist panel
+} vrDrawMode_t;
+
+extern vrDrawMode_t		cl_vrDrawMode;
+
 //=============================================================================
 
 //extern	vm_t			*cgvm;	// interface to cgame dll or vm

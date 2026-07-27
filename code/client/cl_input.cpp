@@ -63,6 +63,7 @@ cvar_t	*cl_vrSmoothTurn;
 cvar_t	*cl_vrTurnSpeed;
 cvar_t	*cl_vrDeadzone;
 cvar_t	*cl_vrWalkWithView;
+cvar_t	*cl_vrStepScale;
 #endif
 
 kbutton_t	in_up, in_down;
@@ -782,6 +783,20 @@ static void CL_VRMove( usercmd_t *cmd ) {
 	cl.viewangles[YAW] = snapYaw + in.headYaw;
 	cl.viewangles[PITCH] = in.headPitch;
 
+	// Tell the renderer how much of the head's heading it is about to see come
+	// back the other way. These angles reach the camera through the player
+	// state, and the renderer composes the live headset pose on top of that
+	// camera - so without this the heading is applied twice.
+	//
+	// Nothing to take off during a cutscene: the camera then comes from the
+	// game's own camera angles rather than the player's view angles, so the
+	// head's heading never entered it.
+	if ( cl.snap.valid && ( cl.snap.ps.pm_flags & PMF_CAMERA_VIEW ) ) {
+		VR_SetBaseYaw( 0.0f );
+	} else {
+		VR_SetBaseYaw( in.headYaw );
+	}
+
 	// Walking follows the off hand rather than the gaze. Tying travel to where
 	// the player is looking means they cannot glance sideways without veering,
 	// which is what makes room scale movement feel like being dragged around;
@@ -792,25 +807,76 @@ static void CL_VRMove( usercmd_t *cmd ) {
 		float side = in.moveRight;
 		float heading = 0.0f;
 
-		if ( in.handsTracked && !( cl_vrWalkWithView && cl_vrWalkWithView->integer ) ) {
+		// Radial, and taken before the rotation below mixes the two axes.
+		// Measuring the components separately afterwards cuts a dead cross out
+		// of the middle of the stick's travel: a gentle push at forty five
+		// degrees splits into two components that are each under the threshold,
+		// so the player leans on the stick and nothing happens.
+		if ( sqrt( forward * forward + side * side ) < deadzone ) {
+			forward = 0.0f;
+			side = 0.0f;
+		}
+
+		if ( in.offhandTracked && !( cl_vrWalkWithView && cl_vrWalkWithView->integer ) ) {
 			heading = in.offhandYaw - in.headYaw;
 		}
 
 		if ( heading != 0.0f ) {
+			// forwardmove and rightmove are resolved against the view angles, so
+			// what goes in the usercmd is the stick expressed in the head's
+			// frame - which means rotating it back by however far the hand leads
+			// the head, not forward by it. The wrong sign here mirrors the
+			// steering rather than offsetting it: the player points the hand
+			// left and walks right, and only dead ahead behaves.
 			float radians = DEG2RAD( heading );
 			float c = cos( radians );
 			float sn = sin( radians );
 			float f = forward;
 
-			forward = f * c - side * sn;
-			side    = f * sn + side * c;
+			forward = f * c + side * sn;
+			side    = side * c - f * sn;
 		}
 
-		if ( fabs( forward ) > deadzone ) {
+		// Room scale, added on top of the stick. The headset moving is only a
+		// camera offset until it reaches the usercmd: the view goes where the
+		// player walked and the character stays behind, so they lean through
+		// walls and never actually travel. Handing the step to the same pmove
+		// the stick feeds means the body goes too, and is stopped by the same
+		// things that stop it when walking on the stick.
+		{
+			float stepForward = in.stepForward;
+			float stepSide = in.stepRight;
+
+			// Into the view's frame, exactly as the stick is, and for the same
+			// reason: the step is measured in the play space, but forwardmove
+			// and rightmove are resolved against where the player is looking.
+			if ( in.headYaw != 0.0f ) {
+				float radians = DEG2RAD( -in.headYaw );
+				float c = cos( radians );
+				float sn = sin( radians );
+				float f = stepForward;
+
+				stepForward = f * c + stepSide * sn;
+				stepSide    = stepSide * c - f * sn;
+			}
+
+			if ( cls.frametime > 0 ) {
+				// Units this frame into units a second, then into the fraction
+				// of a run that represents, which is what the usercmd carries.
+				const float perSecond = 1000.0f / (float)cls.frametime;
+				const float runSpeed = 250.0f;
+				const float factor = cl_vrStepScale ? cl_vrStepScale->value : 1.0f;
+
+				forward += stepForward * perSecond / runSpeed * factor;
+				side    += stepSide * perSecond / runSpeed * factor;
+			}
+		}
+
+		if ( forward != 0.0f ) {
 			cmd->forwardmove = ClampChar( cmd->forwardmove + (int)( forward * 127.0f ) );
 		}
 
-		if ( fabs( side ) > deadzone ) {
+		if ( side != 0.0f ) {
 			cmd->rightmove = ClampChar( cmd->rightmove + (int)( side * 127.0f ) );
 		}
 	}
@@ -1316,6 +1382,9 @@ void CL_InitInput( void ) {
 	cl_vrTurnSpeed = Cvar_Get( "cl_vrTurnSpeed", "90", CVAR_ARCHIVE );
 	cl_vrDeadzone = Cvar_Get( "cl_vrDeadzone", "0.2", CVAR_ARCHIVE );
 	cl_vrWalkWithView = Cvar_Get( "cl_vrWalkWithView", "0", CVAR_ARCHIVE );
+	// How much of a real step becomes a step in the game. 1 is one for one at
+	// vr_worldscale; higher covers more ground than the room has.
+	cl_vrStepScale = Cvar_Get( "cl_vrStepScale", "1", CVAR_ARCHIVE );
 #endif
 }
 

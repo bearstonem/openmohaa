@@ -555,6 +555,27 @@ static void Autosprite2Deform( void ) {
 		VectorSubtract( mid[1], mid[0], major );
 
 		// cross this with the view direction to get minor axis
+		if ( vrView.active ) {
+			// Towards the viewer, not along the view axis. On a monitor the two
+			// amount to the same thing - the eye is effectively infinitely far
+			// away down the middle of the screen - but in a headset they are
+			// not, and taking the view axis swings every one of these sprites
+			// as the head turns while the geometry it stands beside holds
+			// still. That is the second, worse tree leaning out of every real
+			// one: the imposter and the model disagreeing about where the
+			// viewer is.
+			//
+			// Per sprite rather than per batch for the same reason: each one
+			// has to face its own line to the eye, and a single direction for
+			// the whole surface is only right for a sprite dead ahead.
+			vec3_t centre;
+
+			VectorAdd( mid[0], mid[1], centre );
+			VectorScale( centre, 0.5f, centre );
+			VectorSubtract( centre, backEnd.ori.viewOrigin, forward );
+			VectorNormalize( forward );
+		}
+
 		CrossProduct( major, forward, minor );
 		VectorNormalize( minor );
 		

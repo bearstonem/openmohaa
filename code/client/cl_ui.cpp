@@ -29,6 +29,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../qcommon/q_version.h"
 
 #include "cl_ui.h"
+#ifdef USE_OPENXR
+#include "../vr/vr_common.h"
+#endif
 #include "cl_uigamespy.h"
 
 #include <chrono>
@@ -1835,6 +1838,15 @@ void UI_Update(void)
         frame = uWinMan.getFrame();
         view3d->Display(frame, 1.0);
 
+        //
+        // Added in OPM
+        //  The health, ammo and compass widgets are flat, so in VR they belong
+        //  on the wrist panel rather than in the eye buffers.
+        //
+        if (cl_vrDrawMode == VRDRAW_WORLD) {
+            return;
+        }
+
         if (ui_hud && !view3d->LetterboxActive()) {
             // draw the health hud
             if (hud_health) {
@@ -2392,6 +2404,24 @@ void UI_Update(void)
             scoreboard_menu->ForceHide();
         }
     }
+
+    //
+    // Added in OPM
+    //  An eye pass wants the 3D view and none of the widgets around it, so it
+    //  goes straight at the view rather than walking the whole tree. Everything
+    //  else in the tree is flat and is drawn in the panel pass instead.
+    //
+    if (cl_vrDrawMode == VRDRAW_WORLD) {
+        if (view3d && view3d->getShow()) {
+            view3d->Display(uWinMan.getFrame(), 1.0);
+        }
+        return;
+    }
+
+#ifdef USE_OPENXR
+    VR_TraceEvent(VRTRACE_UPDATEVIEWS);
+    VR_TraceState((int)cl_vrDrawMode, Cvar_Get("vr_hudPass", "0", 0)->integer, cls.no_menus);
+#endif
 
     uWinMan.UpdateViews();
 }

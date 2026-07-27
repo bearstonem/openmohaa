@@ -7132,7 +7132,31 @@ void Player::PlayerAngles(void)
         angles[1]                      = portableTurret->GetStartYaw();
     }
 
+    //
+    // Added in OPM
+    //  PmoveAdjustAngleSettings clamps where the player may look while they are
+    //  on a ladder - pitch to 73 degrees, yaw to 70 either side of the ladder's
+    //  facing. That is fine on a monitor, where the game owns the camera and can
+    //  simply refuse to turn it. In a headset it is not: the camera is the
+    //  player's head, and no amount of clamping stops them turning their neck.
+    //  The game would hold its idea of the view still while the headset kept
+    //  reporting the truth, and the two disagreeing is what makes a world
+    //  appear to swim.
+    //
+    //  So the body still gets adjusted - it is what climbs, and what everyone
+    //  else sees on the ladder - and the view is put back afterwards. Looking
+    //  over your shoulder halfway up a ladder is worth more than the clamp was.
+    //
+    static cvar_t *pVRFreeLook = gi.Cvar_Get("vr_freeLook", "0", 0);
+    vec3_t         vUnclamped;
+
+    VectorCopy(v_angle, vUnclamped);
+
     PmoveAdjustAngleSettings(v_angle, angles, &client->ps, &edict->s);
+
+    if (pVRFreeLook->integer) {
+        VectorCopy(vUnclamped, v_angle);
+    }
 
     SetViewAngles(v_angle);
     setAngles(angles);

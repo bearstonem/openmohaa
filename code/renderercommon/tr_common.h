@@ -188,6 +188,10 @@ void		GLimp_SetPresentsToWindow( qboolean presents );
 // GLimp_GL4ES_GetProcAddress for what goes wrong when it does not.
 void	   *GLimp_GetProcAddress( const char *name );
 
+// Bind the window's GL context to the calling thread again. The VR layer needs
+// one current to give the OpenXR session; see GLimp_MakeCurrent.
+qboolean	GLimp_MakeCurrent( void );
+
 void		GLimp_LogComment( char *comment );
 void		GLimp_Minimize(void);
 

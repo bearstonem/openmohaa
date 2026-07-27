@@ -548,6 +548,43 @@ void R_LoadFontShader(fontheader_sgl_t* font)
     }
 }
 
+
+/*
+================
+R_FontTraceBegin / R_FontTraceEnd
+
+Temporary instrumentation, to settle whether the cost of the HUD is the strings
+themselves. Both string paths flush the render command buffer and then drive the
+back end directly, once per call - on a tiler with a framebuffer bound that can
+end the render pass and force a resolve every time. Counting the calls alongside
+the time spent in them says whether that is where the frame is going.
+================
+*/
+static int s_fontMsec;
+static int s_fontCalls;
+static int s_fontLastReport;
+
+static int R_FontTraceBegin( void ) {
+	return ri.Milliseconds();
+}
+
+static void R_FontTraceEnd( int start ) {
+	int now = ri.Milliseconds();
+
+	s_fontMsec += now - start;
+	s_fontCalls++;
+
+	if ( now - s_fontLastReport < 1000 ) {
+		return;
+	}
+
+	ri.Printf( PRINT_ALL, "VR font: %d calls, %dms a second\n", s_fontCalls, s_fontMsec );
+
+	s_fontLastReport = now;
+	s_fontCalls = 0;
+	s_fontMsec = 0;
+}
+
 void R_DrawString_sgl(fontheader_sgl_t* font, const char* text, float x, float y, int maxlen, const float *pvVirtualScreen) {
     float charHeight;
     float startx, starty;
@@ -574,6 +611,8 @@ void R_DrawString_sgl(fontheader_sgl_t* font, const char* text, float x, float y
     if (!font) {
         return;
     }
+
+    const int fontTraceStart = R_FontTraceBegin();
 
     R_IssuePendingRenderCommands();
 
@@ -694,6 +733,8 @@ void R_DrawString_sgl(fontheader_sgl_t* font, const char* text, float x, float y
     }
 
     RB_EndSurface();
+
+    R_FontTraceEnd( fontTraceStart );
 }
 
 void R_DrawString(fontheader_t* font, const char* text, float x, float y, int maxlen, const float *pvVirtualScreen) {

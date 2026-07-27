@@ -30,6 +30,8 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 qboolean	scr_initialized;		// ready to draw
 stereoFrame_t	s_scr_stereoFrame;
 
+vrDrawMode_t	cl_vrDrawMode = VRDRAW_ALL;
+
 cvar_t		*cl_timegraph;
 cvar_t		*cl_debuggraph;
 cvar_t		*cl_graphheight;
@@ -524,6 +526,13 @@ void SCR_SimpleUpdateScreen( void ) {
 			}
 			else {
 				int eye;
+				// Only worth splitting the frame when something else is going to
+				// draw the flat half. Otherwise the eye passes carry it, the way
+				// a flat frame does, and RB_SetGL2D converges it.
+				const qboolean split = VR_WristPanelEnabled();
+
+				cl_vrDrawMode = split ? VRDRAW_WORLD : VRDRAW_ALL;
+				Cvar_Set( "vr_hudPass", split ? "2" : "0" );
 
 				for( eye = 0; eye < VR_MAX_EYES; eye++ ) {
 					VR_PrepareEye( eye );
@@ -533,6 +542,36 @@ void SCR_SimpleUpdateScreen( void ) {
 					// buffers of quad buffered stereo, a different mechanism
 					// entirely: here each eye already has its own framebuffer,
 					// and its viewpoint comes from the headset pose.
+					{
+						const int sceneStart = Sys_Milliseconds();
+						int       issueStart;
+
+						UpdateStereoSide( STEREO_CENTER );
+
+						issueStart = Sys_Milliseconds();
+
+						// Always asked for here, not only under com_speeds: the
+						// frame timing report wants the split, and there is no
+						// console in a headset to turn com_speeds on with.
+						re.EndFrame( &time_frontend, &time_backend );
+						VR_TraceRenderTimes( time_frontend, time_backend );
+						VR_TraceSceneTimes( issueStart - sceneStart,
+							Sys_Milliseconds() - issueStart );
+					}
+
+					VR_FinishEye( eye );
+				}
+
+				// Then the HUD and any menus, once, onto the panel on the
+				// player's wrist. Once rather than per eye because it is flat:
+				// the compositor gives it the same disparity in both eyes by
+				// placing the quad in the room.
+				if( VR_WristPanelVisible() ) {
+					cl_vrDrawMode = VRDRAW_PANEL;
+					Cvar_Set( "vr_hudPass", "1" );
+
+					VR_PrepareWristPanel();
+
 					UpdateStereoSide( STEREO_CENTER );
 
 					if( com_speeds->integer ) {
@@ -542,8 +581,11 @@ void SCR_SimpleUpdateScreen( void ) {
 						re.EndFrame( NULL, NULL );
 					}
 
-					VR_FinishEye( eye );
+					VR_FinishWristPanel();
 				}
+
+				cl_vrDrawMode = VRDRAW_ALL;
+				Cvar_Set( "vr_hudPass", "0" );
 			}
 		}
 

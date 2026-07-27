@@ -60,6 +60,11 @@ around any renderer restart.
 #	include <SDL.h>
 #endif
 
+// From code/sdl/sdl_glimp.c, which owns the window and the GL context. Declared
+// here rather than by including the renderer's headers, which would pull the
+// whole of tr_local into a file that has no business seeing it.
+qboolean GLimp_MakeCurrent(void);
+
 typedef struct {
 	XrSwapchain     handle;
 	uint32_t        width;
@@ -965,8 +970,22 @@ void VR_CreateSession(void)
 	display = eglGetCurrentDisplay();
 	context = eglGetCurrentContext();
 
+	// Being current is per thread, and a window that has not been shown yet has
+	// no surface to be current against - so not finding one here is a question
+	// of timing rather than a missing context. Ask for it before giving up.
 	if (display == EGL_NO_DISPLAY || context == EGL_NO_CONTEXT) {
-		Com_Printf("OpenXR: no current EGL context; cannot create a session\n");
+		Com_Printf("OpenXR: no current EGL context (display %p, context %p); binding it\n",
+			(void *)display, (void *)context);
+
+		if (GLimp_MakeCurrent()) {
+			display = eglGetCurrentDisplay();
+			context = eglGetCurrentContext();
+		}
+	}
+
+	if (display == EGL_NO_DISPLAY || context == EGL_NO_CONTEXT) {
+		Com_Printf("OpenXR: still no current EGL context (display %p, context %p); "
+			"cannot create a session\n", (void *)display, (void *)context);
 		return;
 	}
 

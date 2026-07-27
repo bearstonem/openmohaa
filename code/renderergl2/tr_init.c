@@ -208,6 +208,9 @@ cvar_t	*r_fullscreen;
 cvar_t  *r_noborder;
 
 cvar_t	*r_vrTrace;
+cvar_t	*vr_fovZoom;
+cvar_t	*vr_hudScale;
+cvar_t	*vr_hudDepth;
 cvar_t	*r_customwidth;
 cvar_t	*r_customheight;
 cvar_t	*r_customPixelAspect;
@@ -1385,6 +1388,12 @@ void R_Register( void )
 	r_fullscreen = ri.Cvar_Get( "r_fullscreen", "1", CVAR_ARCHIVE );
 	r_noborder = ri.Cvar_Get("r_noborder", "0", CVAR_ARCHIVE | CVAR_LATCH);
 	r_vrTrace = ri.Cvar_Get( "r_vrTrace", "0", 0 );
+	// Set by cgame from the fov the game asked for; see CG_CalcFov.
+	vr_fovZoom = ri.Cvar_Get( "vr_fovZoom", "1", 0 );
+	// See RB_SetGL2D. Scale is the share of the display the HUD is drawn across;
+	// depth is how far out it is made to converge.
+	vr_hudScale = ri.Cvar_Get( "vr_hudScale", "0.55", CVAR_ARCHIVE );
+	vr_hudDepth = ri.Cvar_Get( "vr_hudDepth", "2.0", CVAR_ARCHIVE );
 	r_customwidth = ri.Cvar_Get( "r_customwidth", "1600", CVAR_ARCHIVE | CVAR_LATCH );
 	r_customheight = ri.Cvar_Get( "r_customheight", "1024", CVAR_ARCHIVE | CVAR_LATCH );
 	r_customPixelAspect = ri.Cvar_Get( "r_customPixelAspect", "1", CVAR_ARCHIVE | CVAR_LATCH );

@@ -96,6 +96,14 @@ qboolean VR_UseScreenLayer(void);
 void VR_PrepareScreenLayer(void);
 void VR_FinishScreenLayer(void);
 
+// The panel on the player's wrist, which carries the HUD and any in game menu
+// while the world is being drawn behind it. Shown by raising the off hand and
+// turning it towards the face, the way a watch is read.
+qboolean VR_WristPanelEnabled(void);
+qboolean VR_WristPanelVisible(void);
+void VR_PrepareWristPanel(void);
+void VR_FinishWristPanel(void);
+
 // Hands the finished images to the compositor.
 void VR_SubmitFrame(void);
 
@@ -116,6 +124,12 @@ typedef struct {
 	float		moveRight;
 	float		turn;			// -1..1, right stick
 
+	// How far the head moved this frame, in engine units, in the play space's
+	// own frame. Fed into the usercmd as movement so that walking about the room
+	// takes the character with it - see CL_VRMove.
+	float		stepForward;
+	float		stepRight;
+
 	float		headYaw;		// degrees, relative to where they started
 	float		headPitch;
 
@@ -124,10 +138,55 @@ typedef struct {
 	float		offhandYaw;
 	float		weaponYaw;
 	float		weaponPitch;
-	qboolean	handsTracked;
+
+	// Separately, because they are used for different things and either hand can
+	// drop out on its own - the off hand steering walking must not stop working
+	// because the weapon hand went out of view.
+	qboolean	offhandTracked;
+	qboolean	weaponTracked;
 } vrInput_t;
 
 qboolean VR_GetInput(vrInput_t *input);
+
+// How much of the head's heading the client has already written into the game's
+// view angles. The renderer takes it back off before composing the headset onto
+// the game's camera, so the same rotation is not applied twice.
+void VR_SetBaseYaw(float yaw);
+
+// The renderer's own split of the frame, for the timing report: how long was
+// spent building the scene against how long was spent issuing it.
+void VR_TraceRenderTimes(int frontEndMsec, int backEndMsec);
+
+// How long the game spent building the frame, against how long the renderer
+// spent issuing it. The first covers everything cgame does per frame, which is
+// far more than drawing.
+void VR_TraceSceneTimes(int sceneMsec, int issueMsec);
+
+// Inside the scene: the 3D half against the flat half. Splits cgame's own per
+// frame work from the 2D path, which flushes the render command buffer once per
+// string drawn and is a suspect in its own right.
+void VR_TraceViewTimes(int worldMsec, int hudMsec);
+
+// Of the flat half, how much is the game's own HUD as against the engine's
+// overlays around it.
+void VR_TraceHudTimes(int cgameMsec);
+
+// Counters for the paths that draw the flat content, so a path that is never
+// reached can be told apart from one that is reached and draws nothing.
+#define VRTRACE_DRAW2D      0	// View3D::Draw2D entered
+#define VRTRACE_CGAME_HUD   1	// cge->CG_Draw2D entered
+#define VRTRACE_UPDATEVIEWS 2	// uWinMan.UpdateViews entered
+#define VRTRACE_VIEW3D      3	// View3D::Draw entered
+#define VRTRACE_COUNT       4
+void VR_TraceEvent(int which);
+
+// The client's idea of the frame, so the report can say what mode it was in.
+void VR_TraceState(int drawMode, int hudPass, int noMenus);
+
+// The flat pass broken down further: the fade and letterbox overlays, the
+// centre print, and the sound/net/subtitle overlays, against the set2D that
+// precedes them all.
+void VR_TraceHudParts(int setup, int fades, int prints, int overlays, int tail);
 
 #ifdef __cplusplus
 }

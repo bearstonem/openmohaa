@@ -727,12 +727,16 @@ RE_SetVRView
 vrViewState_t vrView;
 
 void RE_SetVRView(const float *origin, const vec3_t *axis,
-		float tanLeft, float tanRight, float tanUp, float tanDown)
+		float tanLeft, float tanRight, float tanUp, float tanDown,
+		float baseYaw, int eye)
 {
 	if (!origin || !axis) {
 		vrView.active = qfalse;
 		return;
 	}
+
+	vrView.baseYaw = baseYaw;
+	vrView.eye = eye;
 
 	VectorCopy(origin, vrView.origin);
 	VectorCopy(axis[0], vrView.axis[0]);

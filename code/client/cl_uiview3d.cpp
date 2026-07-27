@@ -21,6 +21,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "cl_ui.h"
+#ifdef USE_OPENXR
+#include "../vr/vr_common.h"
+#endif
 #include "../qcommon/localization.h"
 
 #include "../server/server.h"
@@ -571,18 +574,44 @@ void View3D::DrawNetProfile(void)
 
 void View3D::Draw2D(void)
 {
+#ifdef USE_OPENXR
+    VR_TraceEvent(VRTRACE_DRAW2D);
+#endif
+#ifdef USE_OPENXR
+    const int fadeStart = Sys_Milliseconds();
+    int       printStart = fadeStart;
+    int       overlayStart = fadeStart;
+    int       fadeEnd;
+    int       overlayEnd = fadeStart;
+#endif
+
     if (!cls.no_menus) {
         DrawFades();
     }
 
     DrawLetterbox();
 
+#ifdef USE_OPENXR
+    fadeEnd = Sys_Milliseconds();
+#endif
+
     if ((cl_debuggraph->integer || cl_timegraph->integer) && !cls.no_menus) {
         SCR_DrawDebugGraph();
     } else if (!cls.no_menus) {
         if (cge) {
+#ifdef USE_OPENXR
+            const int cgameStart = Sys_Milliseconds();
+            VR_TraceEvent(VRTRACE_CGAME_HUD);
+#endif
             cge->CG_Draw2D();
+#ifdef USE_OPENXR
+            VR_TraceHudTimes(Sys_Milliseconds() - cgameStart);
+#endif
         }
+
+#ifdef USE_OPENXR
+        printStart = Sys_Milliseconds();
+#endif
 
         if (m_locationprint) {
             LocationPrint();
@@ -590,17 +619,32 @@ void View3D::Draw2D(void)
             CenterPrint();
         }
 
+#ifdef USE_OPENXR
+        overlayStart = Sys_Milliseconds();
+#endif
+
         if (!cls.no_menus) {
             DrawSoundOverlay();
             DrawNetProfile();
             DrawSubtitleOverlay();
         }
+
+#ifdef USE_OPENXR
+        overlayEnd = Sys_Milliseconds();
+#endif
     }
 
     if (fps->integer && !cls.no_menus) {
         DrawFPS();
         DrawProf();
     }
+
+#ifdef USE_OPENXR
+    // Everything from here accounted for: whatever the parts do not add up to
+    // is not in this function at all.
+    VR_TraceHudParts(0, fadeEnd - fadeStart, overlayStart - printStart,
+        overlayEnd - overlayStart, Sys_Milliseconds() - overlayEnd);
+#endif
 }
 
 void View3D::CenterPrint(void)
@@ -777,15 +821,62 @@ void View3D::DrawFades(void)
 
 void View3D::Draw(void)
 {
-    if (clc.state != CA_DISCONNECTED) {
+    const int drawStart = Sys_Milliseconds();
+#ifdef USE_OPENXR
+    VR_TraceEvent(VRTRACE_VIEW3D);
+#endif
+    int       hudStart;
+
+    //
+    // Added in OPM
+    //  The one place the 3D scene and the flat content over it meet, and so the
+    //  one place a VR frame has to be able to take them apart - see
+    //  vrDrawMode_t. The eye passes want the scene and nothing else; the wrist
+    //  panel wants everything else and not the scene.
+    //
+    if (clc.state != CA_DISCONNECTED && cl_vrDrawMode != VRDRAW_PANEL) {
         SCR_DrawScreenField();
     }
 
+    hudStart = Sys_Milliseconds();
+
+    if (cl_vrDrawMode == VRDRAW_WORLD) {
+        //
+        // Added in OPM
+        //  Everything flat has gone to the wrist panel except the reticle and
+        //  the scope surround, which have to stay with the world - see
+        //  CG_Draw2D, which draws only those while vr_hudPass says so.
+        //
+        if (cge && !cls.no_menus) {
+            set2D();
+            cge->CG_Draw2D();
+        }
+#ifdef USE_OPENXR
+        VR_TraceViewTimes(hudStart - drawStart, Sys_Milliseconds() - hudStart);
+#endif
+        return;
+    }
+
+#ifdef USE_OPENXR
+    {
+        const int setupStart = Sys_Milliseconds();
+
+        set2D();
+        re.SavePerformanceCounters();
+
+        VR_TraceHudParts(Sys_Milliseconds() - setupStart, 0, 0, 0, 0);
+    }
+#else
     set2D();
 
     re.SavePerformanceCounters();
+#endif
 
     Draw2D();
+
+#ifdef USE_OPENXR
+    VR_TraceViewTimes(hudStart - drawStart, Sys_Milliseconds() - hudStart);
+#endif
 }
 
 float avWidth = 0.0;

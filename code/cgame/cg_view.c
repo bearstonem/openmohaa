@@ -516,6 +516,41 @@ static int CG_CalcFov(void)
         inwater = qfalse;
     }
 
+    //
+    // Added in OPM
+    //  In VR the eye frustum comes from the headset rather than from this fov,
+    //  so a scope or a pair of binoculars would otherwise change nothing at all.
+    //  What the renderer wants is the factor rather than the angle: it narrows
+    //  the headset's own frustum by this much and leaves the composition layer
+    //  claiming the full field of view, so the compositor magnifies the result
+    //  back out to fill the display. That is a scope which costs no extra
+    //  drawing and loses no resolution - the narrow view was rendered into the
+    //  whole eye texture, so it comes out sharper than the unzoomed one.
+    //
+    //  Published as a cvar because it is the ratio of two numbers that only
+    //  exist here. The aspect correction above cancels between them, so this is
+    //  simply the two camera fovs against each other.
+    //
+    {
+        static float lastZoom = -1.0f;
+        float        zoom     = 1.0f;
+
+        if (cg.camera_fov > 1.0f && cg_fov->value > 1.0f) {
+            zoom = tan(DEG2RAD(cg_fov->value) * 0.5f) / tan(DEG2RAD(cg.camera_fov) * 0.5f);
+        }
+
+        // Only ever narrower. Widening the view in a headset is a good way to
+        // make someone ill, and nothing asks for it deliberately.
+        if (zoom < 1.0f) {
+            zoom = 1.0f;
+        }
+
+        if (fabs(zoom - lastZoom) > 0.001f) {
+            lastZoom = zoom;
+            cgi.Cvar_Set("vr_fovZoom", va("%f", zoom));
+        }
+    }
+
     // set it
     cg.refdef.fov_x    = fov_x;
     cg.refdef.fov_y    = fov_y;

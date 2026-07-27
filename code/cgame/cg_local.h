@@ -513,6 +513,8 @@ extern "C" {
     //
     extern cvar_t *cg_fov;
     extern cvar_t *cg_cheats;
+    // Which half of a split VR frame is being drawn; see CG_Draw2D.
+    extern cvar_t *vr_hudPass;
 
     //
     // cg_main.c

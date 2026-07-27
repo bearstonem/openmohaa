@@ -507,6 +507,11 @@ void Set2DWindow(int x, int y, int w, int h, float left, float right, float bott
     qglViewport(x, y, w, h);
     qglScissor(x, y, w, h);
 
+    // Everything the UI draws comes through here rather than RB_SetGL2D, so
+    // this is where the headset's correction has to be applied or none of it
+    // reaches the HUD.
+    R_VRAdjust2DOrtho(&left, &right, &bottom, &top);
+
     Mat4Ortho(left, right, bottom, top, n, f, matrix);
     GL_SetProjectionMatrix(matrix);
     Mat4Identity(matrix);

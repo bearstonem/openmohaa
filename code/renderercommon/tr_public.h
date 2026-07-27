@@ -97,9 +97,13 @@ typedef struct {
 	// The eye being rendered, for stereo from a headset. origin and angles are
 	// the head pose relative to the game's camera, in engine units and degrees;
 	// the tangents are the eye's asymmetric frustum edges at unit distance.
-	// Passing NULL for origin returns to the ordinary flat projection.
+	// baseYaw is how much of the head's heading the game's camera already
+	// carries, and is taken back off before the head is composed onto it - see
+	// R_ApplyVRView. Passing NULL for origin returns to the ordinary flat
+	// projection.
 	void	(*SetVRView)( const float *origin, const vec3_t *axis,
-					float tanLeft, float tanRight, float tanUp, float tanDown );
+					float tanLeft, float tanRight, float tanUp, float tanDown,
+					float baseYaw, int eye );
 
 
 	int		(*MarkFragments)( int numPoints, const vec3_t *points, const vec3_t projection,

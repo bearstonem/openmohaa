@@ -669,11 +669,91 @@ RB_SetGL2D
 
 ================
 */
+/*
+================
+R_VRAdjust2DOrtho
+
+Bends a 2D ortho window to suit the eye it is about to be drawn into.
+
+Flat content in a headset needs three corrections that no screen ever does.
+Each eye looks through a frustum that is not centred on its own axis, so
+identical 2D lands in a different place in each eye; there is no disparity, so
+what does line up sits at infinity; and the edges of the display are outside
+what can comfortably be read.
+
+Expressed as a change to the ortho window rather than a transform on every
+vertex, because the window is one matrix and the vertices are thousands.
+
+Lives here, and is called from both places that set up a 2D projection, because
+Set2DWindow builds its own matrix rather than going through RB_SetGL2D - so
+correcting only one of them corrects nothing that the UI actually draws.
+================
+*/
+void R_VRAdjust2DOrtho( float *left, float *right, float *bottom, float *top )
+{
+	float scale, depth;
+	float tanWidth, tanHeight;
+	float offX, offY, parallax;
+	float windowWidth, windowHeight;
+
+	if ( !vrView.active ) {
+		return;
+	}
+
+	tanWidth = vrView.tanRight - vrView.tanLeft;
+	tanHeight = vrView.tanUp - vrView.tanDown;
+
+	// No frustum yet means nothing to centre on, and dividing by it would leave
+	// a NaN in the projection - which does not look like an error, it looks like
+	// the HUD simply not being there.
+	if ( tanWidth < 0.0001f || tanHeight < 0.0001f ) {
+		return;
+	}
+
+	scale = vr_hudScale ? vr_hudScale->value : 1.0f;
+	depth = vr_hudDepth ? vr_hudDepth->value : 2.0f;
+
+	if ( scale < 0.1f ) {
+		scale = 0.1f;
+	} else if ( scale > 1.0f ) {
+		scale = 1.0f;
+	}
+	if ( depth < 0.5f ) {
+		depth = 0.5f;
+	}
+
+	windowWidth = *right - *left;
+	windowHeight = *bottom - *top;
+
+	offX = -( vrView.tanRight + vrView.tanLeft ) / tanWidth;
+	offY = -( vrView.tanUp + vrView.tanDown ) / tanHeight;
+
+	// Half an interpupillary distance at the given range, as a share of the
+	// eye's half width, opposite ways round for the two eyes. This is what puts
+	// the HUD at that range instead of infinitely far away.
+	parallax = ( 2.0f * 0.032f ) / ( depth * tanWidth );
+	offX += ( vrView.eye == 0 ) ? parallax : -parallax;
+
+	// A window wider than the content draws the content smaller and keeps it
+	// centred; the offsets then slide it bodily.
+	*left = *left - windowWidth * ( 1.0f + offX - scale ) / ( 2.0f * scale );
+	*right = *left + windowWidth / scale;
+
+	*top = *top + windowHeight * ( offY + scale - 1.0f ) / ( 2.0f * scale );
+	*bottom = *top + windowHeight / scale;
+}
+
 void	RB_SetGL2D (void) {
 	mat4_t matrix;
 	int width, height;
+	float left, right, bottom, top;
 
-	if (backEnd.projection2D && backEnd.last2DFBO == glState.currentFBO)
+	// The early out keys on the bound framebuffer, which on a build with the
+	// renderer's own framebuffer support switched off is always NULL - so once
+	// this has run it never runs again. Harmless when the 2D projection is a
+	// constant, and not harmless in VR, where it differs per eye.
+	if (backEnd.projection2D && backEnd.last2DFBO == glState.currentFBO
+		&& !vrView.active)
 		return;
 
 	backEnd.projection2D = qtrue;
@@ -694,7 +774,13 @@ void	RB_SetGL2D (void) {
 	qglViewport( 0, 0, width, height );
 	qglScissor( 0, 0, width, height );
 
-	Mat4Ortho(0, width, height, 0, 0, 1, matrix);
+	left = 0;
+	right = width;
+	bottom = height;
+	top = 0;
+	R_VRAdjust2DOrtho( &left, &right, &bottom, &top );
+
+	Mat4Ortho(left, right, bottom, top, 0, 1, matrix);
 	GL_SetProjectionMatrix(matrix);
 	Mat4Identity(matrix);
 	GL_SetModelviewMatrix(matrix);

@@ -116,6 +116,7 @@ cvar_t *ui_timemessage;
 // Added in OPM
 //
 cvar_t *cg_fov;
+cvar_t *vr_hudPass;
 cvar_t *cg_cheats;
 
 /*
@@ -212,6 +213,8 @@ void CG_RegisterCvars(void)
     //
 
     cg_fov = cgi.Cvar_Get("cg_fov", "80", CVAR_ARCHIVE);
+    // Set by the client around each half of a split VR frame; 0 on flat frames.
+    vr_hudPass = cgi.Cvar_Get("vr_hudPass", "0", 0);
     cg_cheats = cgi.Cvar_Get("cheats", "0", CVAR_USERINFO | CVAR_SERVERINFO | CVAR_LATCH);
 }
 /*

@@ -859,10 +859,25 @@ void R_SetupProjection(viewParms_t *dest, float zProj, float zFar, qboolean comp
 		// which reads as an image the eyes cannot fuse. The matrix below
 		// already carries the off-centre terms, so the runtime's own edges go
 		// straight in.
-		xmin = zProj * vrView.tanLeft;
-		xmax = zProj * vrView.tanRight;
-		ymin = zProj * vrView.tanDown;
-		ymax = zProj * vrView.tanUp;
+		// Scopes and binoculars. The game narrows its fov to zoom, but in a
+		// headset the frustum comes from the runtime, so that request would
+		// otherwise be dropped on the floor. Narrowing the eye frustum by the
+		// same factor while the composition layer keeps claiming the headset's
+		// full field of view leaves the compositor to magnify the result, which
+		// is both free and sharper than zooming after the fact: the narrow view
+		// was rendered into the whole eye texture.
+		float zoom = vr_fovZoom ? vr_fovZoom->value : 1.0f;
+
+		if ( zoom < 1.0f ) {
+			zoom = 1.0f;
+		} else if ( zoom > 16.0f ) {
+			zoom = 16.0f;
+		}
+
+		xmin = zProj * vrView.tanLeft / zoom;
+		xmax = zProj * vrView.tanRight / zoom;
+		ymin = zProj * vrView.tanDown / zoom;
+		ymax = zProj * vrView.tanUp / zoom;
 
 		// Stereo separation is the flat renderer's way of faking two eyes, and
 		// would be applied on top of a real one.

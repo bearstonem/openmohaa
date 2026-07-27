@@ -546,8 +546,21 @@ static void R_ApplyVRView( refdef_t *fd ) {
 	// the headset decides everything about where the eyes are relative to that.
 	// Only the heading is taken from the game - its pitch and roll would fight
 	// the viewer's own neck.
+	//
+	// Minus whatever heading the client already fed into the view angles. The
+	// game is told where the player is looking so that objectives and anything
+	// else consulting the view angles agree with what is in front of them, but
+	// that same heading then comes back through the player state and into this
+	// camera - and composing the head onto it again turns it twice. Yaw ends up
+	// doubled while pitch, which the game's camera does not carry here, does
+	// not, and half of the doubled yaw arrives a frame late through prediction.
+	// The result reads as a world that swims when the head turns.
+	//
+	// Taking it back off leaves the game's own contributions - recoil, lean,
+	// cutscene cameras, ladders - composed with the current headset pose, which
+	// is what this function is for.
 	vectoangles( fd->viewaxis[0], baseAngles );
-	VectorSet( bodyAngles, 0, baseAngles[YAW], 0 );
+	VectorSet( bodyAngles, 0, baseAngles[YAW] - vrView.baseYaw, 0 );
 	AnglesToAxis( bodyAngles, bodyAxis );
 
 	// Rotate the head's axes into the body's frame. Composed as a rotation
