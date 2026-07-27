@@ -53,11 +53,52 @@ if(NOT TARGET GL)
         "renderer's calls. Configure with -DUSE_GL4ES=OFF to build without it.")
 endif()
 
-target_compile_definitions(GL PRIVATE
-    NOX11
-    NO_GBM
-    DEFAULT_ES=2
-    NO_INIT_CONSTRUCTOR)
+# Built the way RTCWQuest builds it, because that combination is known to render
+# on this device and this one does not.
+#
+# Their Android.mk (SupportLibs/gl4es/Android.mk) compiles with exactly:
+#
+#     -DBCMHOST -DNOX11 -DNO_GBM -DDEFAULT_ES=2 -DNO_INIT_CONSTRUCTOR
+#     -O3 -fcommon -fvisibility=hidden -funwind-tables
+#
+# Two differences from what CMake produces on its own are worth naming.
+#
+# ANDROID is *not* among them. gl4es's own CMakeLists adds it whenever it is
+# built with the NDK toolchain, and it is not a harmless label: it selects
+# different code in the loader, in glx, and in hardext - which is where gl4es
+# compiles a probe shader to decide what its whole fixed function pipeline is
+# allowed to emit. ndk-build never defines it, so the reference has been
+# exercised without it and this has not.
+#
+# BCMHOST is the Raspberry Pi switch, which looks wrong on a Quest and is
+# carried anyway, because everything it gates is additionally guarded by
+# !defined(ANDROID). Matching the reference matters more here than tidiness.
+#
+# add_definitions() in gl4es's CMakeLists is a directory property, so the
+# ANDROID it adds has to be removed at the directory it was set on rather than
+# overridden on the target.
+foreach(GL4ES_DIR ${gl4es_SOURCE_DIR} ${gl4es_SOURCE_DIR}/src)
+    set_property(DIRECTORY ${GL4ES_DIR} PROPERTY COMPILE_DEFINITIONS
+        BCMHOST
+        NOX11
+        NO_GBM
+        DEFAULT_ES=2
+        NO_INIT_CONSTRUCTOR)
+endforeach()
+
+target_compile_options(GL PRIVATE
+    -O3
+    # gl4es is old C that expects tentative definitions to be merged. Clang has
+    # defaulted to -fno-common since 15; the NDK here is newer than that and the
+    # reference build is not.
+    -fcommon
+    -fvisibility=hidden
+    -funwind-tables)
+
+# What their LOCAL_LDLIBS names. gl4es dlopen()s the driver itself, so these are
+# not needed to resolve anything; they are here so the library is built against
+# the same set the reference links.
+target_link_libraries(GL PRIVATE EGL GLESv3 dl log)
 
 set_target_properties(GL PROPERTIES
     # Shipped inside the APK, so it needs the prefix the top level CMakeLists
