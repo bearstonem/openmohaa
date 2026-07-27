@@ -89,6 +89,11 @@ static struct {
 	XrSpace         viewSpace;
 	XrSessionState  sessionState;
 
+	// Something for the engine's GL context to be current against when the
+	// window has no surface, which in a headset is the ordinary case. See
+	// VR_CreateSession.
+	EGLSurface      eglTinySurface;
+
 	uint32_t        eyeWidth;
 	uint32_t        eyeHeight;
 
@@ -970,27 +975,37 @@ void VR_CreateSession(void)
 	display = eglGetCurrentDisplay();
 	context = eglGetCurrentContext();
 
-	// Being current is per thread, and a window that has not been shown yet has
-	// no surface to be current against - so not finding one here is a question
-	// of timing rather than a missing context. Ask for it before giving up.
+	// Nothing is current, and on this device that is the normal case rather
+	// than an error.
+	//
+	// SDL binds the GL context against the window's EGL surface. In a headset
+	// there is no window being presented - every pixel goes to the compositor
+	// through the swapchains - so that surface may never arrive. What SDL does
+	// then is the trap: SDL_EGL_MakeCurrent, handed no surface, calls
+	// eglMakeCurrent(EGL_NO_SURFACE, EGL_NO_CONTEXT) to unbind everything and
+	// *returns success*, and SDL records the context as current. So SDL is
+	// certain a context is bound while EGL reports none, and asking SDL to bind
+	// it again does nothing at all - SDL_GL_MakeCurrent sees its own bookkeeping
+	// agree and returns early.
+	//
+	// RTCWQuest never has this problem because it never depends on a window
+	// surface: it makes its context current against a 16x16 pbuffer
+	// (TBXR_Common.c, egl->TinySurface). Same thing here, except the context is
+	// the one SDL already made, since the engine renders in it.
 	if (display == EGL_NO_DISPLAY || context == EGL_NO_CONTEXT) {
-		Com_Printf("OpenXR: no current EGL context (display %p, context %p); binding it\n",
-			(void *)display, (void *)context);
+		display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+		context = (EGLContext)SDL_GL_GetCurrentContext();
 
-		if (GLimp_MakeCurrent()) {
-			display = eglGetCurrentDisplay();
-			context = eglGetCurrentContext();
+		if (display == EGL_NO_DISPLAY || !context) {
+			Com_Printf("OpenXR: no EGL context to bind (display %p, context %p); "
+				"cannot create a session\n", (void *)display, (void *)context);
+			return;
 		}
 	}
 
-	if (display == EGL_NO_DISPLAY || context == EGL_NO_CONTEXT) {
-		Com_Printf("OpenXR: still no current EGL context (display %p, context %p); "
-			"cannot create a session\n", (void *)display, (void *)context);
-		return;
-	}
-
 	// The runtime wants the EGLConfig the context was made with, which EGL will
-	// only hand back by id.
+	// only hand back by id. Needed for the binding below, and to make a surface
+	// the context will accept.
 	{
 		const EGLint attribs[] = { EGL_CONFIG_ID, 0, EGL_NONE };
 		EGLint       queryAttribs[3];
@@ -1003,6 +1018,33 @@ void VR_CreateSession(void)
 			Com_Printf("OpenXR: could not recover the EGLConfig (id %d)\n", configId);
 			config = NULL;
 		}
+	}
+
+	if (eglGetCurrentContext() != context) {
+		static const EGLint pbufferAttribs[] = {
+			EGL_WIDTH, 16,
+			EGL_HEIGHT, 16,
+			EGL_NONE
+		};
+
+		if (vr.eglTinySurface == EGL_NO_SURFACE && config) {
+			vr.eglTinySurface = eglCreatePbufferSurface(display, config, pbufferAttribs);
+		}
+
+		if (vr.eglTinySurface == EGL_NO_SURFACE) {
+			Com_Printf("OpenXR: could not create the pbuffer to bind the context against "
+				"(egl error 0x%x); cannot create a session\n", eglGetError());
+			return;
+		}
+
+		if (!eglMakeCurrent(display, vr.eglTinySurface, vr.eglTinySurface, context)) {
+			Com_Printf("OpenXR: eglMakeCurrent on the pbuffer failed (egl error 0x%x); "
+				"cannot create a session\n", eglGetError());
+			return;
+		}
+
+		Com_Printf("OpenXR: bound the engine's GL context against a 16x16 pbuffer; "
+			"the window had no surface\n");
 	}
 
 	memset(&binding, 0, sizeof(binding));
@@ -2004,6 +2046,11 @@ void VR_DestroySession(void)
 	vr.sessionRunning = qfalse;
 	vr.frameStarted = qfalse;
 	vr.sessionState = XR_SESSION_STATE_UNKNOWN;
+
+	// The pbuffer the context may be current against outlives the session on
+	// purpose - the session is torn down and rebuilt around renderer restarts,
+	// and unbinding the context in the middle of that would be the very thing
+	// this exists to prevent. It goes at shutdown, in VR_Shutdown.
 }
 
 /*
@@ -2018,6 +2065,20 @@ void VR_Shutdown(void)
 	if (vr.instance != XR_NULL_HANDLE) {
 		xrDestroyInstance(vr.instance);
 		vr.instance = XR_NULL_HANDLE;
+	}
+
+	if (vr.eglTinySurface != EGL_NO_SURFACE) {
+		EGLDisplay display = eglGetCurrentDisplay();
+
+		if (display == EGL_NO_DISPLAY) {
+			display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+		}
+
+		if (display != EGL_NO_DISPLAY) {
+			eglDestroySurface(display, vr.eglTinySurface);
+		}
+
+		vr.eglTinySurface = EGL_NO_SURFACE;
 	}
 
 	vr.enabled = qfalse;
