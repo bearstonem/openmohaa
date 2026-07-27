@@ -171,30 +171,46 @@ void GL_Cull( int cullType ) {
 	} 
 	else 
 	{
+		GLenum face;
+
 		qglEnable( GL_CULL_FACE );
 
 		if ( cullType == CT_BACK_SIDED )
 		{
-			if ( backEnd.viewParms.isMirror )
-			{
-				qglCullFace( GL_FRONT );
-			}
-			else
-			{
-				qglCullFace( GL_BACK );
-			}
+			face = backEnd.viewParms.isMirror ? GL_FRONT : GL_BACK;
 		}
 		else
 		{
-			if ( backEnd.viewParms.isMirror )
-			{
-				qglCullFace( GL_BACK );
-			}
-			else
-			{
-				qglCullFace( GL_FRONT );
-			}
+			face = backEnd.viewParms.isMirror ? GL_BACK : GL_FRONT;
 		}
+
+#ifdef USE_GL4ES
+		// Name a third face first, so the one we actually want cannot be
+		// mistaken for a no-op.
+		//
+		// gl4es keeps its own copy of the cull face and returns early from
+		// glCullFace whenever the requested mode matches it
+		// (src/gl/face.c:14). Measured on the device, past gl4es and straight
+		// out of libGLESv3: its copy said GL_FRONT while the driver was
+		// culling GL_BACK. So the engine asked for GL_FRONT every frame, gl4es
+		// judged that redundant against a copy that had drifted, and the
+		// hardware went on removing precisely the faces Quake wants kept -
+		// its world polygons are back facing in GL's terms, which is why
+		// CT_FRONT_SIDED culls GL_FRONT in the first place.
+		//
+		// The symptom was the whole world invisible while models stayed put,
+		// because model shaders are CT_TWO_SIDED and never enable culling at
+		// all. Inverting the culled face did not help either: asking for
+		// GL_BACK matched the driver's real state, so the picture never
+		// changed. Only disabling culling outright brought the world back.
+		//
+		// GL_FRONT_AND_BACK is safe here - nothing is drawn between these two
+		// calls - and it guarantees the second differs from whatever gl4es
+		// believes, so the driver is always told.
+		qglCullFace( GL_FRONT_AND_BACK );
+#endif
+
+		qglCullFace( face );
 	}
 }
 

@@ -9,25 +9,27 @@ Branch `vr-quest3`.
 
 ## 0. Status at a glance
 
-**Working, on the device:** renderergl1 on gl4es, OpenXR session, both eyes and
-the flat panel composited, **the menus**, cutscenes, controllers and pointer
-beam, static models and entities fully textured, and **90 fps at 4 ms per eye** -
-the number this whole swap was for, against rend2's 50-60 ms.
+**Working, on the device, with nothing overridden:** renderergl1 on gl4es, the
+OpenXR session, both eyes and the flat panel, the menus, cutscenes, controllers
+and pointer beam, **and the world** - terrain, BSP geometry, static models,
+textures, lightmaps, fog and sky. **89-90 fps at 6 ms per eye**, against rend2's
+50-60 ms. That is the number this whole swap existed to get.
 
-**The open problem:** **BSP world geometry and terrain do not draw.** Models
-render perfectly; the sky shows through everything else. See section 9 - and read
-9.2 first, because the bisect that section describes is not trustworthy and says
-so.
+Three bugs were behind the black screen, and each is recorded in section 8 with
+what proved it:
 
-**Two things fixed since the last handoff**, both real, both in section 8: a
-window-resize `vid_restart` that tore down the GL context and XR session five
-seconds into every run (that was the black menu), and `RB_SurfaceFace` writing
-32-bit indices through a 16-bit array (that was the mangled, stretched world).
+1. A window-resize `vid_restart` tearing down the GL context and the OpenXR
+   session five seconds into every run. That was the black menu.
+2. `RB_SurfaceFace` writing 32-bit indices through a 16-bit array. That was the
+   world smeared into streaks.
+3. **gl4es's cached cull face drifting from the driver's**, so the engine's
+   `glCullFace(GL_FRONT)` was dropped as redundant every frame while the
+   hardware culled `GL_BACK` - exactly the faces Quake keeps. That was the
+   invisible world.
 
-**Do not trust anything in section 7 that is not marked as measured.** A long
-sequence of engine-side experiments in an earlier session were run against a
-gl4es that could not draw a single triangle. See section 6 - that trap, and the
-probe-blindness one in 9.3, are the two most important things in this document.
+**The single most important lesson is section 9.** Everything the engine could
+be asked about itself said the renderer was correct, because under gl4es the
+engine is largely asking gl4es to repeat the engine's own values back.
 
 ---
 
@@ -419,81 +421,58 @@ printed a different draw route than `R_DrawElements` actually took.
 
 ---
 
-## 9. Still open: world geometry does not draw
+## 9. Ask the driver, not gl4es
 
-Models render perfectly. BSP world surfaces and terrain do not, and the frame
-shows the sky through them.
+**gl4es answers state queries from its own tables.** `glGetIntegerv` for
+`GL_CULL_FACE_MODE`, `GL_FRONT_FACE` and `GL_MODELVIEW_MATRIX` all come out of
+`glstate`, not the driver (`src/gl/getter.c:636-902`) - the same way `glGetString`
+comes from constants (5.5). So reading state back through `qgl` and comparing it
+against the engine compares the engine with gl4es's copy of the engine. It
+agrees by construction and proves nothing.
 
-### 9.1 What has been measured, not argued
+Two measurements in this session did exactly that and were reported as findings:
+"the matrices are identical, `maxdiff 0.000`" and "GL and the engine agree on
+culling". Both were vacuous. The second was actively harmful - the driver was
+culling `GL_BACK` while gl4es reported the `GL_FRONT` the engine had asked for,
+and that *was* the bug being hunted.
 
-Each of these was tested directly and none of them is the cause:
+**gl4es also drops calls its cache judges redundant** - `glCullFace`
+(`face.c:14`), `glDepthMask`, `glDepthFunc`, `glBlendFunc`, `glColorMask`,
+`glScissor`, `glViewport`. Once its copy drifts, the engine can never correct it:
+it asks for the right value, gl4es compares against the wrong copy, and the
+driver never hears. Nothing raises an error and nothing looks wrong from inside.
 
-| Ruled out | How |
-|---|---|
-| Vertex data, index range, bounds | traced per surface; all correct, world-space boxes sane, no NaNs |
-| Modelview and projection | **read back from GL** and compared to the engine's: identical, determinant 1 |
-| Clip space position | NDC box computed over every vertex: on screen, `far 0 behind 0` |
-| Visibility / submission | 165 world draws per sample, ground shaders among them |
-| Draw route | `r_primitives 1` (glArrayElement) and 2 (glDrawElements) both |
-| Stage iterator | `r_forceGenericStage 1` |
-| Multitexture | `r_ext_multitexture 0` |
-| Lightmap | `r_vertexLight 1` |
-| Fog | `r_noFog 1` |
-| Stencil shadows | `cg_shadows` was already 0 |
-| Terrain pool | `1275 tris / 682 verts` of 24576; no "insufficient tris" |
-| VR camera | `org -5953 -48 -238`, inside the ground surface's own box, ~60-100 units above it |
-| Cull state | GL and engine agree: `GL_FRONT`, `GL_CCW`, `CT_FRONT_SIDED` |
+**So: resolve `glGetIntegerv`/`glIsEnabled` out of `libGLESv3` and ask the
+hardware.** `r_traceSurf` does this and prints both answers side by side. It is
+what cracked the cull bug in one run after many that measured nothing.
 
-### 9.2 The contradiction, which is the real finding
+The same applies to setting state, which is what `GL_Cull` now does: name a
+throwaway value first so the real one cannot match a stale cache.
 
-`r_noCull 1` (culling off entirely) made the world render. `r_invertCull 1`
-(swap which face is culled) did **not**. Those cannot both be true of a winding
-problem - degenerate triangles produce no pixels either way, and a reversed
-winding would be fixed by inverting the cull face.
+### 9.1 Probes must be shown to reach the thing they measure
 
-Worse, **the same configuration has produced different results on different
-runs.** Terrain came back when `developer 1`/`ter_count 1` were restored, and
-those are provably print-only: `g_nSplit`/`g_nMerge` are incremented and printed
-and never read for any decision.
+Three probes in this session had blind spots exactly where the fault was, and
+each produced a confident wrong conclusion:
 
-**So the single-run bisect in this session is not trustworthy, and neither are
-the conclusions drawn from it.** Anything below "9.1" that reads like a cause is
-not one.
+- the panel readback counted samples brighter than 8 against a buffer that is
+  never cleared, so "nothing drawn" and "drawn black" were the same number;
+- `r_flatColor` did not apply to multitextured surfaces, so it covered models
+  only - every "the world is not drawing" reading from it was about geometry
+  that was never in question;
+- the flat-red override restored its state inside `if (primitives == 2)`, a
+  branch that was never taken, so it corrupted the renderer it was measuring.
 
-### 9.3 What to do next
+**Before believing a negative result, prove the probe reached the surfaces in
+question.** This is section 6's lesson in a second form and it cost more here
+than the bugs did.
 
-**Repeat every result before believing it.** Two runs minimum, same config. The
-non-determinism is the first thing to characterise - if it correlates with where
-the player stands, terrain LOD carries state across frames and adapts to view
-movement, which is the obvious suspect and is MOHAA-specific (RTCW has no
-terrain, so the reference cannot help).
+### 9.2 Single runs are not evidence
 
-**Then capture a frame from outside the engine.** Every measurement so far has
-been the engine describing itself, and the engine believes it is doing
-everything right. RenderDoc on Quest, or Adreno GPU Inspector, would show what
-the driver actually received. That is the tool this problem has needed for
-several rounds.
-
-**Do not trust a probe that has not been shown to reach the surfaces in
-question.** Three separate probes in this session had blind spots exactly there:
-the panel readback could not tell black from unwritten; `r_flatColor` did not
-apply to multitextured surfaces, so it covered models only and every "the world
-is not drawing" reading from it was about the wrong geometry; and the flat-red
-override restored its state on a branch that was never taken, corrupting the
-renderer it was measuring.
-
-### 9.4 Diagnostics left in the tree
-
-All `CVAR_TEMP`, all default off, all settable from `main/autoexec.cfg`:
-`r_flatColor` (flat per-surface colour, world in red), `r_traceSurf` (per-surface
-data, NDC extent, GL matrices, cull state), `r_forceGenericStage`, `r_noCull`,
-`r_noDepth`, `r_noFog`, `r_invertCull`. `vr_debugPanel` clears the flat panel to
-magenta and classifies samples. `vr_captureEye` writes the left eye to
-`main/vrshot0-5.tga` every two seconds - **this one is worth keeping.** Six
-rounds went into resolving verbal descriptions that one image settled.
-
-`R_ApplyVRView` also now refuses a head pose whose axes are not unit length. It
-has never been observed to fire; it is a guard, not a fix.
+The same configuration produced different results on different runs more than
+once, and a bisect was built on top of that before it was noticed. Repeat a
+result before building on it, and never change code and configuration in the
+same step - doing so destroyed the only known-good baseline and cost several
+round trips to rebuild.
 
 ## 10. Working notes
 
