@@ -7,6 +7,12 @@ a phone or tablet builds the same way.
 VR itself is not part of this. What you get is the ordinary game running as a
 normal Android app.
 
+
+> **The gl4es boundary.** On Android the fixed function renderer runs on top of
+> gl4es, which keeps its own copy of GL state that can disagree with the driver.
+> If you are debugging anything that looks like *the geometry is correct and
+> nothing is drawn*, read [the gl4es boundary](04-gl4es.md) first.
+
 ## What you need
 
 | | |

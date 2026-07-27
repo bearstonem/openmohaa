@@ -423,6 +423,9 @@ printed a different draw route than `R_DrawElements` actually took.
 
 ## 9. Ask the driver, not gl4es
 
+**Written up properly in `docs/markdown/04-coding/04-gl4es.md`.** That file is
+the reference; this section is the short form.
+
 **gl4es answers state queries from its own tables.** `glGetIntegerv` for
 `GL_CULL_FACE_MODE`, `GL_FRONT_FACE` and `GL_MODELVIEW_MATRIX` all come out of
 `glstate`, not the driver (`src/gl/getter.c:636-902`) - the same way `glGetString`
