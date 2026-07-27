@@ -29,14 +29,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 vrViewState_t vrView;
 
-// Framebuffer objects are past this renderer's era, so its qgl.h names none of
-// them. Spelled out here the same way qgl.h spells out the multitexture
-// extension it also predates.
-#ifndef GL_FRAMEBUFFER
-#define GL_FRAMEBUFFER 0x8D40
-#endif
-
-static void(APIENTRY *qglBindFramebuffer)(GLenum target, GLuint framebuffer);
 
 /*
 ============
@@ -78,40 +70,33 @@ void RE_SetVRView(
 ============
 RE_SetDefaultFramebuffer
 
-Substitutes the framebuffer the renderer treats as the screen, so that an eye
-is drawn straight into its OpenXR swapchain image.
+Called when the VR layer is about to move the target out from under the
+renderer, so that anything still owed to the old one is paid first.
 
-This renderer predates framebuffer objects and has none of its own - it draws
-to whatever is bound and never touches the binding. That makes this the whole
-of the redirect: bind the eye once per pass and everything that follows lands
-there. There is no equivalent of rend2's FBO_Bind to intercept and nothing to
-restore, which is the one respect in which the fixed function path is the
-easier of the two to put a headset behind.
+Deliberately does not bind anything. This renderer predates framebuffer objects,
+has none of its own, and never touches the binding - so there is nothing here to
+redirect, and the VR layer's own bind is what selects the eye.
 
-The entry point is asked for rather than declared with the rest because
-renderergl1 has no extension probe - it is loaded on first use, through the
-same resolver as everything else so that it reaches gl4es and gl4es stays
-aware of which framebuffer is bound.
+Binding here would in fact be worse than useless. The renderer's GL goes through
+gl4es, and gl4es can only bind framebuffers it created itself: its
+glBindFramebuffer looks the name up in its own table, and for a name that came
+from the driver's glGenFramebuffers - which is where every one of the VR layer's
+framebuffers comes from - the lookup misses, it raises GL_INVALID_VALUE and
+returns without binding. Worse, it leaves gl4es believing framebuffer 0 is still
+current. That was a black headset with the frame loop running at a contented 90
+fps, everything drawn neatly into the window nobody was looking at.
+
+What is needed instead is the flush. gl4es batches geometry and issues it
+lazily, so work built for one target would otherwise arrive in whichever is
+bound when it finally goes out. Flushing while the old target is still bound is
+what keeps one eye's contents out of the next.
 ============
 */
 void RE_SetDefaultFramebuffer(unsigned int framebuffer)
 {
-    static qboolean resolved = qfalse;
-
-    if (!resolved) {
-        resolved          = qtrue;
-        qglBindFramebuffer = GLimp_GetProcAddress("glBindFramebuffer");
-
-        if (!qglBindFramebuffer) {
-            ri.Printf(PRINT_WARNING, "glBindFramebuffer unavailable; VR eye redirect disabled\n");
-        }
+    if (qglFlush) {
+        qglFlush();
     }
-
-    if (!qglBindFramebuffer) {
-        return;
-    }
-
-    qglBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
 
     // Drawing into a framebuffer means something else is presenting it, so the
     // window must not also be swapped - two presentation paths running at

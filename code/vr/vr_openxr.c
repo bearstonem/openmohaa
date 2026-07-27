@@ -2423,21 +2423,21 @@ void VR_PrepareEye(int eye)
 	swapchain->acquired = qtrue;
 	vr.eyeStart = Sys_Milliseconds();
 
-	// Tell the renderer before touching GL here, not after.
+	// Tell the renderer before moving the target, not after.
 	//
-	// The renderer may be holding geometry it has not issued yet - gl4es
-	// batches and flushes lazily - and it only learns to flush when something
-	// it knows about changes the target. Moving the binding underneath it
-	// first would leave that batch to arrive in whatever was bound next, which
-	// is the previous eye's contents appearing in this one.
+	// The renderer may be holding geometry it has not issued yet - under gl4es
+	// it certainly is, since gl4es batches and issues lazily - and that work
+	// belongs to whatever was bound when it was built. Giving the renderer the
+	// chance to flush while the old target is still current is what keeps one
+	// pass's leftovers out of the next.
+	//
+	// It does not do the binding. These framebuffers come from the driver's
+	// glGenFramebuffers, and gl4es can only bind names it created itself, so
+	// asking it to would raise GL_INVALID_VALUE and change nothing.
 	if (re.SetDefaultFramebuffer) {
 		re.SetDefaultFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
 	}
 
-	// Bound again directly because the renderer only binds framebuffers when
-	// its own framebuffer support is enabled, and the eye target has to be
-	// current either way. Same target, so this is a no-op where the call above
-	// did the work.
 	glBindFramebuffer(GL_FRAMEBUFFER, swapchain->frameBuffers[swapchain->acquiredIndex]);
 	glViewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
 	glScissor(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
@@ -2581,8 +2581,8 @@ void VR_FinishEye(int eye)
 	}
 
 	// Again before the direct calls below, and for the same reason as in
-	// VR_PrepareEye: this is the point the renderer's own pending work has to
-	// land in this eye rather than in whatever is bound after it.
+	// VR_PrepareEye: this is where the renderer flushes, and it has to do it
+	// while this eye is still the bound target.
 	if (re.SetDefaultFramebuffer) {
 		re.SetDefaultFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
 	}
@@ -3335,8 +3335,9 @@ void VR_PrepareScreenLayer(void)
 		VR_PlaceScreenAnchor();
 	}
 
-	// Renderer first, so that anything it is still holding is flushed into the
-	// target it was drawn for; see VR_PrepareEye.
+	// Renderer first, so it flushes what it is still holding into the target
+	// that work was drawn for; see VR_PrepareEye. It does not bind - the call
+	// below does.
 	if (re.SetDefaultFramebuffer) {
 		re.SetDefaultFramebuffer(vr.uiFramebuffer);
 	}
@@ -3498,8 +3499,9 @@ void VR_PrepareWristPanel(void)
 		return;
 	}
 
-	// Renderer first, so that anything it is still holding is flushed into the
-	// target it was drawn for; see VR_PrepareEye.
+	// Renderer first, so it flushes what it is still holding into the target
+	// that work was drawn for; see VR_PrepareEye. It does not bind - the call
+	// below does.
 	if (re.SetDefaultFramebuffer) {
 		re.SetDefaultFramebuffer(vr.uiFramebuffer);
 	}
