@@ -44,9 +44,10 @@ void *lib = dlopen( "libGLESv3.so", RTLD_NOW | RTLD_LOCAL );
 void (*driverGetIntegerv)(GLenum, GLint *) = dlsym( lib, "glGetIntegerv" );
 ```
 
-`r_traceSurf` in `renderergl1/tr_shade.c` does this and prints both answers side
-by side. It is what found the cull bug, in one run, after many runs that
-measured nothing.
+A temporary `r_traceSurf` probe did this - printing gl4es's answer and the
+driver's side by side - and found the cull bug in one run, after many runs that
+measured nothing. It has since been removed; the technique is the point, and it
+is four lines to put back.
 
 ## 2. gl4es drops calls it judges redundant
 

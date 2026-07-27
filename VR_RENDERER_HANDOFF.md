@@ -446,7 +446,8 @@ it asks for the right value, gl4es compares against the wrong copy, and the
 driver never hears. Nothing raises an error and nothing looks wrong from inside.
 
 **So: resolve `glGetIntegerv`/`glIsEnabled` out of `libGLESv3` and ask the
-hardware.** `r_traceSurf` does this and prints both answers side by side. It is
+hardware.** A temporary `r_traceSurf` probe did this, printing both answers
+side by side; it has since been removed, but the technique is
 what cracked the cull bug in one run after many that measured nothing.
 
 The same applies to setting state, which is what `GL_Cull` now does: name a
@@ -480,8 +481,9 @@ round trips to rebuild.
 ## 10. Working notes
 
 **The device configuration lives at `misc/android/autoexec.cfg`.** It holds the
-overrides the world currently needs to draw at all (`r_noCull 1`, `r_noDepth 1`)
-and is not part of the APK - deploy it next to the game data:
+nothing load bearing any more - the overrides it used to carry went with the
+bugs they worked around. It is not part of the APK; deploy it next to the game
+data:
 
 ```sh
 adb push misc/android/autoexec.cfg \
