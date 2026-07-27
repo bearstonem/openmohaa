@@ -1,10 +1,29 @@
 # Swapping the renderer — where this stands and what to do next
 
 Companion to `VR_PORT_STATUS.md`. That file describes the VR layer; this one is
-about the decision to stop using `renderergl2` and what it takes to finish.
+about the move from `renderergl2` to `renderergl1` on gl4es.
 
-Branch `vr-quest3`. Everything described as done is committed and installed on
-the headset; **it has not been seen running yet**.
+Branch `vr-quest3`.
+
+---
+
+## 0. Status at a glance
+
+**Working, on the device:** renderergl1 builds and runs on the Quest 3 on gl4es.
+OpenXR session up, 90 fps against a 90 Hz display, both eyes and the flat panel
+composited, cutscenes render, controllers and pointer beam render, and **the
+engine's own geometry renders** — confirmed by a flat-red override showing the
+intro logo screen in red.
+
+**The one open problem:** the **main menu draws nothing**. Same frame path, same
+framebuffer, same renderer. The logo screen before the cutscene renders; the
+menu after it does not.
+
+**Do not trust anything in section 7 that is not marked as measured.** A long
+sequence of engine-side experiments in this session were run against a gl4es
+that could not draw a single triangle, and every negative result from them is
+worthless. See section 6 — that trap is the single most important thing in this
+document.
 
 ---
 
@@ -13,28 +32,26 @@ the headset; **it has not been seen running yet**.
 **Team Beef's RTCWQuest is cloned at `/home/berkybear/RTCWQuest`**, clean at
 `4c714b9`.
 
-Same Quake 3 engine lineage, same genre, same headset — and unlike this port, it
-is finished. **Go to it first for any problem this port is trying to solve.**
-That is a standing instruction, not a suggestion: the wrist panel here was built
-and iterated over five build cycles before anyone checked how they handle the
-HUD, and the answer turned out to be that they do not use a wrist panel at all.
-Several other answers were derived slowly and then found sitting in their tree.
-
-### Where things are
+Same Quake 3 engine lineage, same genre, same headset, same gl4es — and unlike
+this port, it is finished. **Go to it first for any problem this port is trying
+to solve.** That is a standing instruction, not a suggestion. In this session it
+was violated repeatedly and cost most of the elapsed time: the answer to the
+single biggest blocker (section 5.8) was sitting in their `Android.mk` the whole
+time.
 
 | Path (under `Projects/Android/jni/`) | What |
 |---|---|
-| `RTCWVR/TBXR_Common.c` | their reusable OpenXR layer: session, swapchains, composition layers, frame submit |
+| `RTCWVR/TBXR_Common.c` | their OpenXR layer: session, swapchains, composition layers, frame submit |
 | `RTCWVR/VrInputDefault.c` | movement, gestures, weapon handling |
-| `RTCWVR/VrInputWeaponAlign.c` | per-weapon aim calibration, positional movement |
-| `RTCWVR/VrClientInfo.h` | the whole VR state struct — read this first to see what they bother to track |
-| `rtcw/src/` | the game and the original renderer, with their VR changes already in place |
-| `SupportLibs/gl4es/` | the vendored translation layer, and the `Android.mk` whose flags this port copies |
+| `RTCWVR/VrInputWeaponAlign.c` | per-weapon aim calibration |
+| `RTCWVR/VrClientInfo.h` | their whole VR state struct |
+| `rtcw/src/renderer/` | the fixed function renderer with their GLES changes (`#ifdef HAVE_GLES`) |
+| `SupportLibs/gl4es/Android.mk` | **the gl4es build flags. These matter. See 5.8.** |
 
 ### Already extracted — do not re-derive
 
-**Aiming** (`rtcw/src/game/g_weapon.c:1904`). The shot direction is computed in
-the *game*, where the trace is fired:
+**Aiming** (`rtcw/src/game/g_weapon.c:1904`). Shot direction is computed in the
+*game*, where the trace is fired:
 
 ```c
 VectorCopy(gVR->weaponangles, viewang);
@@ -43,121 +60,68 @@ viewang[YAW] = ent->client->ps.viewangles[YAW]
 ```
 
 Pitch and roll come straight from the controller; yaw is the view yaw plus how
-far the controller leads the head. The controller's absolute yaw is meaningless —
-the play space's heading is arbitrary — so only the offset from the head carries
-information. `weaponangles_knife` and `offhandweaponangles` are separate sets.
+far the controller leads the head. The controller's absolute yaw is meaningless.
 The camera stays on the head; only the trace moves to the hand.
 
 **6DoF** (`rtcw/src/client/cl_input.c:847`). Head position delta is fed into the
-usercmd as movement, added to the stick. A camera offset on its own lets the
-player lean through a wall and never actually travel. Already ported here.
+usercmd as movement. Already ported here.
 
-**The HUD.** No wrist panel. Screen space, in the eye buffers, with three
-corrections: re-centred on each eye's off-centre frustum, given stereo parallax
-so it converges at `cg_hudDepth`, and scaled in from the edges by `cg_hudScale`.
+**The HUD.** No wrist panel. Screen space, in the eye buffers, re-centred on
+each eye's off-centre frustum, given stereo parallax, scaled in from the edges.
 
-**Hands.** No controller models and no hand assets. `cgs.media.handModel` is
-RTCW's existing view-model hand, moved to the controller's real-world offset from
-the head (`convertFromVR`).
+**Hands.** No controller models. Their existing view-model hand, moved to the
+controller's real-world offset from the head.
 
-**Weapon selection.** A 3D wheel anchored to the controller
-(`cg_weapons.c:4623`): it snapshots the controller position when opened, then
-measures displacement from that point to choose a segment. Items come from a
-backpack gesture — reach over the shoulder, detected by distance from the HMD,
-height offset, and the hand-forward against head-forward dot product going
-negative. `vr.weapon_stabilised` is a two-handed hold; `vr.scopeengaged` is that
-weapon brought near the face, which is how they do ADS without a button.
+**Ladders.** Nothing at all — RTCW's are contents-based so it works for free.
+**Does not transfer**: MOH:AA is entity-based with a view clamp in
+`PmoveAdjustViewAngleSettings_OnLadder`.
 
-**Ladders.** Nothing at all — the only commit touching their ladder code is the
-original source import. RTCW's ladders are contents-based and their view angles
-already carry the head, so it works for free. **This one does not transfer**:
-MOH:AA is entity-based with a view clamp in `PmoveAdjustViewAngleSettings_OnLadder`.
-See `Player::PlayerAngles` for how that is handled here.
-
-**Not there, so do not go looking**: no foveation, no space warp, no
-performance-level hints, and `XR_FB_display_refresh_rate` is vestigial — its
-entry points are declared, nulled and never resolved, and `TBXR_GetRefreshRate`
-returns a hardcoded 90.
+**Not there, so do not go looking**: no foveation, no space warp, no performance
+level hints. `XR_FB_display_refresh_rate` is vestigial in their tree.
 
 ---
 
-## 2. Why
+## 2. Why the renderer was swapped
 
-The port ran at **10–15 fps against a 90Hz display, every frame late**. The frame
-was taken apart phase by phase on the device until there was one number left:
+renderergl2 ran at **10–15 fps against a 90 Hz display**. Taken apart on the
+device:
 
 | Phase | Cost |
 |---|---|
 | `xrWaitFrame` | 0 ms |
-| Building the 3D scene (cgame + renderer front end) | 2–3 ms |
-| cgame's HUD (`CG_Draw2D`) | 0 ms |
-| Font strings (~14 a frame) | ~2 ms |
-| Compositor submit | 0 ms |
+| Building the 3D scene | 2–3 ms |
 | **Issuing the scene to GL** | **50–60 ms, per eye** |
 | GPU, measured with `glFinish` | **3 ms** |
 
-The GPU finishes in 3 ms and then waits. Rendering at 60% resolution — 36% of
-the pixels — bought only a 23% frame time reduction, so it is not fill rate
-either. The cost is **CPU, in the back end, issuing draw calls**.
+The GPU finishes in 3 ms and waits. Rendering at 36% of the pixels bought only
+23% back, so it is not fill rate. It is CPU in the back end issuing draw calls:
+rend2 puts every surface through a GLSL program with dozens of uniforms, 139
+`GLSL_BindProgram`/`GLSL_SetUniform` call sites in the surface path, once per
+surface per eye.
 
-`renderergl2` is the rend2 rewrite. Every surface goes through a GLSL program
-with dozens of uniforms set on it — 139 `GLSL_BindProgram`/`GLSL_SetUniform`
-call sites in the surface path — once per surface, per frame, per eye. That is
-where the 55 ms goes.
-
-None of what it buys is visible here. This game's art was authored for a fixed
-function renderer: there are no normal maps or specular maps for rend2's
-lighting to read, so it pays in full and returns a picture *further* from the
-original than the plain path gives. The game looks worse than RTCWQuest and runs
-at a fraction of the speed.
-
-**RTCWQuest's renderer contains no GLSL at all.** It is the original Quake 3
-forward renderer, running on **gl4es**, a GL1.x→OpenGL ES translation layer they
-vendor. That is the stack to copy, and openmohaa already ships `renderergl1`.
+None of what that buys is visible here — this art has no normal or specular
+maps. RTCWQuest's renderer contains no GLSL at all: the original Quake 3 forward
+renderer on gl4es. That is the stack being copied.
 
 ---
 
-## 3. Measurement traps, so nobody repeats them
+## 3. Measurement traps in the *old* renderer investigation
 
-Three things actively lied during the investigation. All three cost a run on the
-device.
+Kept because they are still true of the code.
 
-**`backEnd.pc.msec` is assigned, not accumulated** (`tr_backend.c`). It is set at
-the end of each `RB_ExecuteRenderCommands`. The scene's big execution sets it to
-~55, then later empty flushes overwrite it with 0, and `RE_EndFrame` reads the
-last one. It reported 0 ms while the back end was eating the entire frame.
+**`backEnd.pc.msec` is assigned, not accumulated** (`tr_backend.c`). Later empty
+flushes overwrite the scene's real number with 0.
 
-**`Set2DWindow` begins with `R_IssuePendingRenderCommands()`** (`tr_draw.c:502`).
-The 3D scene is *built* during the world pass but only *executed* when something
-forces a flush — and the first thing that does is the HUD's `set2D()`. So the
-whole frame's rendering appears, to any timer, to be HUD cost. It is not.
+**`Set2DWindow` begins with `R_IssuePendingRenderCommands()`**. The 3D scene is
+*built* during the world pass but only *executed* when something forces a flush,
+and the first thing that does is the HUD. The whole frame's rendering therefore
+appears to any timer to be HUD cost.
 
 **`tr.frontEndMsec` only covers `RE_RenderScene`**, not the cgame work around it.
-A small front end number does not mean cgame is cheap; here it happened to be,
-but that had to be measured separately.
-
-Two hypotheses died on contact with data and are recorded so they are not
-revisited: the masked alpha clear in `VR_FinishEye` (refuted — cost varies with
-scene, a fixed stall would not), and the per-string command buffer flush in
-`R_DrawString_sgl` (refuted — ~100–300 calls a second, ~2 ms a frame).
 
 ---
 
-## 4. What is done
-
-- **`cmake/libraries/gl4es.cmake`** — fetches gl4es v1.1.6 from
-  `github.com/ptitSeb/gl4es` via FetchContent, matching the pattern used for
-  SDL2/OpenAL/OpenXR, with `GL4ES_SOURCE_PATH` to build against a local tree.
-  Uses RTCWQuest's exact flags: `NOX11`, `NO_GBM`, `DEFAULT_ES=2`,
-  `NO_INIT_CONSTRUCTOR`.
-- **`USE_GL4ES`** option in `CMakeLists.txt`, defaulting on for Android, included
-  from `cmake/libraries/all.cmake`.
-- **`renderergl1` builds for arm64 against gl4es's `<GL/gl.h>`, and is the
-  default renderer on Android.** The whole of the VR work is now in it: eye
-  redirect, head pose, asymmetric frustum, HUD convergence, viewer-facing
-  sprites.
-- **The APK ships `libgl4es.so`** and the renderer's GL entry points resolve to
-  it.
+## 4. Build
 
 ```sh
 cmake -B build-gl1 -G Ninja \
@@ -167,205 +131,347 @@ cmake -B build-gl1 -G Ninja \
 cmake --build build-gl1 -j$(nproc)
 
 cd misc/android && gradle assembleDebug -PnativeLibsDir=../../build-gl1/apk-libs
+cd ../.. && adb install -r misc/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-renderergl2 is still reachable with
-`-DBUILD_RENDERER_GL1=OFF -DBUILD_RENDERER_GL2=ON -DUSE_GL4ES=OFF`, and still
-builds.
-
-### What section 5 said, and what was actually wrong
-
-Recorded because each of these hid the next, and the build succeeding said
-nothing about any of them.
-
-**renderergl1 had never compiled.** The claim above that it did was false.
-`cmake/platforms/android.cmake` held `set(BUILD_RENDERER_GL1 OFF CACHE INTERNAL
-"")`, and **`CACHE INTERNAL` implies `FORCE`** — so the `-D` on the command line
-was overwritten on every configure. The cache read `BUILD_RENDERER_GL1:INTERNAL=OFF`,
-`build.ninja` never mentioned renderergl1, and the build that "succeeded" was a
-renderergl2 build with gl4es sitting unused beside it. Check the cache, not the
-command line.
-
-**gl4es was building all along**, into `lib/` *in the engine's source tree* —
-gl4es's own CMakeLists sets `CMAKE_LIBRARY_OUTPUT_DIRECTORY` to
-`${CMAKE_SOURCE_DIR}/lib`, and under FetchContent `CMAKE_SOURCE_DIR` is the
-top-level project. It also forces the suffix `.so.1` after the fashion of a
-system OpenGL, which Android will neither package nor load. `RENDERER_LIBRARIES`
-did reach the client (`cmake/client.cmake:136`); that part was never broken.
-
-**The link was never the question.** `renderergl1` does not call GL by name.
-`qgl_linked.h` is dead code that nothing includes; `renderercommon/qgl.h`
-declares every entry point as a *function pointer*, filled in by
-`GLimp_GetProcAddresses` from `SDL_GL_GetProcAddress`. So `DT_NEEDED` order was
-irrelevant and gl4es would have been linked, loaded, and never called.
-
-Worse than never called: on **EGL 1.5, which the Quest is**,
-`SDL_EGL_GetProcAddress` tries `eglGetProcAddress` *before* the library it
-loaded. Adreno answers for every name OpenGL 1.x and ES have in common —
-`glEnable`, `glBindTexture`, `glDrawArrays`, `glTexImage2D`, ~80 more — so only
-the desktop-only names (`glBegin`, `glMatrixMode`) would have reached gl4es.
-gl4es would have been batching geometry and tracking a matrix stack against
-calls the driver was never told about. The renderer now resolves through
-`GLimp_GetProcAddress`, which goes straight to the gl4es handle.
-
-The extension *string* had the same shape of problem:
-`SDL_GL_ExtensionSupported` reads the driver's ES list, which names none of the
-desktop extensions the renderer asks after, so `GL_ARB_multitexture` read as
-absent and the renderer would have quietly dropped to one texture unit.
+renderergl1 + gl4es is the default on Android. renderergl2 is still reachable
+with `-DBUILD_RENDERER_GL1=OFF -DBUILD_RENDERER_GL2=ON -DUSE_GL4ES=OFF` and
+still builds.
 
 ---
 
-## 5. What remains, in order
+## 5. What was wrong, and what fixing it required
 
-### 5.1 Does it run
+All committed. Each of these was a hard blocker in its own right.
 
-Everything below section 4 is built and installed and has **not yet been seen
-on the device**. That is the only open question that matters; the rest of this
-section is what to look at when it answers.
+### 5.1 renderergl1 had never compiled
 
-Two things are worth knowing before reading a failure:
+`cmake/platforms/android.cmake` held `set(BUILD_RENDERER_GL1 OFF CACHE INTERNAL "")`.
+**`CACHE INTERNAL` implies `FORCE`**, so the `-D` on the command line was
+overwritten on every configure. The cache read `BUILD_RENDERER_GL1:INTERNAL=OFF`
+and `build.ninja` never mentioned renderergl1. A previous handoff claimed this
+renderer "compiles clean"; it had never been compiled at all. **Check the cache,
+not the command line.**
 
-- gl4es reports `GL_VERSION` as a *desktop* string (`"2.1 gl4es wrapper
-  1.1.6"`), so `GLimp_GetProcAddresses` takes the desktop fixed-function branch
-  rather than the ES one. That is intended. If the log shows the ES path, gl4es
-  is not answering `glGetString` and nothing else will work either.
-- `initialize_gl4es()` is called on the first proc-address request, which is
-  just after `SDL_GL_CreateContext`. RTCWQuest calls it earlier still, before
-  any context exists, so a context being current is not a requirement.
+### 5.2 gl4es was building into the source tree, under a name Android cannot load
 
-### 5.2 gl4es alongside the VR layer's own GLES calls
+gl4es's own CMakeLists sets `CMAKE_LIBRARY_OUTPUT_DIRECTORY` to
+`${CMAKE_SOURCE_DIR}/lib`, which under FetchContent is *this* project's source
+root. It also forces the suffix `.so.1`. Android has no versioned sonames and
+the package manager extracts only `lib*.so`. Redirected into the build tree as
+`libgl4es.so` and staged with the other APK libraries.
 
-`code/vr/vr_openxr.c` calls GLES directly - swapchain framebuffers, the pointer
-beam, the panel resolve - while the renderer goes through gl4es on the same
-context. **RTCWQuest does exactly this** (`TBXR_Common.c` binds framebuffers,
-clears and blits directly while the engine renders through gl4es), so the
-arrangement is proven; do not redesign it on suspicion.
+### 5.3 The renderer's GL entry points must come from gl4es
 
-Three things about that boundary were learned the hard way and should not be
-re-derived.
+renderergl1 does not call GL by name. `qgl_linked.h` is dead code that nothing
+includes; `renderercommon/qgl.h` declares every entry point as a **function
+pointer** filled by `GLimp_GetProcAddresses` from `SDL_GL_GetProcAddress`.
 
-**gl4es cannot bind a framebuffer it did not create.** `gl4es_glBindFramebuffer`
-looks the name up in gl4es's own table (`find_framebuffer`); for a name from the
-driver's `glGenFramebuffers` - which is every framebuffer the VR layer owns - the
-lookup misses, it raises `GL_INVALID_VALUE`, **returns without binding**, and
-goes on believing framebuffer 0 is current. Routing the eye redirect through
-gl4es therefore does nothing at all, and the symptom is not an error: it is a
-black headset, working audio, and the frame loop reporting a contented 90 fps
-while the whole game draws into the window. The renderer must bind nothing; the
-VR layer's own direct bind is what selects the eye. That is what RTCWQuest does,
-because Quake 3's fixed function renderer has no framebuffer calls in it at all.
+On **EGL 1.5, which the Quest is**, `SDL_EGL_GetProcAddress` tries
+`eglGetProcAddress` *before* the library it loaded. The driver answers for every
+name OpenGL 1.x and ES have in common — `glEnable`, `glBindTexture`,
+`glDrawArrays`, `glTexImage2D`, ~80 more — so only desktop-only names
+(`glBegin`, `glMatrixMode`) would reach gl4es. The renderer now resolves through
+`GLimp_GetProcAddress`, straight to the gl4es handle.
 
-**But the renderer still has to be told, for the flush.** gl4es batches geometry
-and issues it lazily, so work built for one target arrives in whichever is bound
-when it finally goes out. `RE_SetDefaultFramebuffer` exists now only to flush -
-it binds nothing - and the VR layer calls it *before* its own bind so the flush
-lands while the old target is still current.
+The **extension string** has the same problem: `SDL_GL_ExtensionSupported` reads
+the driver's ES list, which names none of the desktop extensions the renderer
+asks after, so `GL_ARB_multitexture` read as absent and the renderer would have
+dropped to one texture unit.
 
-**gl4es answers `glGetString` from constants.** `GL_VERSION`, `GL_VENDOR` and
-`GL_RENDERER` come out of its own globals without the driver being asked, so the
-engine's long-standing proof that a context is live - `GL_VERSION` coming back
-non-NULL - passes unconditionally under gl4es. A context created but never bound
-sails through `R_Init` and is only noticed somewhere else entirely. `GLimp_SetMode`
-now asks SDL directly instead.
+### 5.4 The fixed function path asked for a context that does not exist
 
-Not established: whether gl4es's cached state survives the VR layer's direct
-`glDisable(GL_SCISSOR_TEST)` / `glColorMask` / `glViewport`. Quake 3's backend
-re-issues those every frame and RTCWQuest gets away with it, so this is a suspect
-to remember rather than a bug to fix in advance.
+`GLimp_SetMode`'s `fixedFunction` branch offered exactly one context: **desktop
+OpenGL 1.1**. There is no such thing on Android; window creation failed and
+R_Init gave up with `Couldn't get a visual`. renderergl2 never met this because
+it takes the other branch.
 
-### 5.2.1 The EGL context
+Under `USE_GL4ES` that branch now asks for **ES 3.0 then ES 2.0**. The renderer
+is never told: it reads its version through gl4es, which reports desktop GL
+(`2.1 gl4es wrapper 1.1.6`), and takes the desktop fixed function path on the
+strength of it. ES underneath, desktop GL above — the whole point of the layer.
 
-SDL binds the GL context against the *window's* EGL surface, and in a headset
-there is no window being presented - so that surface never arrives. What SDL does
-then is the trap: `SDL_EGL_MakeCurrent`, handed no surface and without
-`gl_allow_no_surface`, calls `eglMakeCurrent(EGL_NO_SURFACE, EGL_NO_CONTEXT)` to
-unbind everything **and returns success**. SDL then records the context as
-current, so SDL and EGL disagree permanently, and asking SDL to bind it again
-does nothing because `SDL_GL_MakeCurrent` sees its own bookkeeping agree and
-returns early.
+### 5.5 gl4es answers `glGetString` from constants
+
+`GL_VERSION`, `GL_VENDOR` and `GL_RENDERER` come out of gl4es's own globals
+without the driver being asked. The engine's only check that a context is live is
+`GL_VERSION` coming back non-NULL, so under gl4es that check passes
+unconditionally and a context created but never bound sails through `R_Init`.
+`GLimp_SetMode` now asks SDL directly instead.
+
+### 5.6 SDL unbinds the context and reports success
+
+`SDL_EGL_MakeCurrent`, handed no surface and without `gl_allow_no_surface`:
+
+```c
+if (!egl_context || (!egl_surface && !_this->gl_allow_no_surface)) {
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+}
+return 0;   /* success, either way */
+```
+
+In a headset there is no window being presented, so that surface never arrives.
+SDL then records the context as current, and SDL and EGL disagree permanently.
+Asking SDL to bind it again does nothing — `SDL_GL_MakeCurrent` sees its own
+bookkeeping agree and returns early with `/* We're already current. */`.
 
 RTCWQuest never meets this because it never depends on a window surface: it makes
-its context current against a 16x16 pbuffer (`TBXR_Common.c`, `egl->TinySurface`).
-`VR_CreateSession` now does the same with the context SDL already made. The
-pbuffer outlives the session on purpose and is released in `VR_Shutdown`.
+its context current against a **16×16 pbuffer** (`TBXR_Common.c`,
+`egl->TinySurface`). Same here, with the context SDL already made. The pbuffer
+outlives the session deliberately and is released in `VR_Shutdown`.
 
-### 5.3 Then the things the renderer swap was for
+### 5.7 gl4es must own the `GL_FRAMEBUFFER` binding — and only that
 
-- `vr_resolutionScale` back to 1 - fill rate was never the problem.
-- Measure the frame again. The whole point was the 50-60 ms of CPU in rend2's
-  back end; the number to beat is that, not the GPU's 3 ms.
-- Section 7's instrumentation comes out once the number is in. It is still
-  wanted for the run that produces it - especially the `glFinish` in
-  `VR_FinishEye`, which is what separates work from queueing.
+gl4es keeps its own table of framebuffers it created and **renders from that,
+not from the driver's binding**:
 
-## 6. Built but never deployed
+```c
+gles_glBindFramebuffer(GL_FRAMEBUFFER, current_fb->id ? current_fb->id : mainfbo_fbo);
+```
 
-Both are in the tree, both are independent of the renderer choice, both should
-come along whichever renderer wins. They were built when the headset went to
-sleep and never reached the device.
+A framebuffer from the driver's `glGenFramebuffers` is not in that table, so
+`gl4es_glBindFramebuffer` raises `GL_INVALID_VALUE`, **returns without binding**,
+and leaves `current_fb` at zero. Measured directly:
 
-**The HUD.** `R_VRAdjust2DOrtho` centres flat content on the eye's own axis,
-gives it stereo parallax so it converges at `vr_hudDepth` (2 m), and scales it in
-from the edges by `vr_hudScale` (0.55). It is called from **both** `RB_SetGL2D`
-*and* `Set2DWindow` — the second one matters, because everything the UI draws
-goes through `Set2DWindow`, which builds its own matrix and never touches
-`RB_SetGL2D`. Correcting only one corrects nothing visible. The HUD was invisible
-before this because `RB_SetGL2D`'s early out keys on the bound framebuffer, which
-is always NULL when the renderer's own FBO support is off — so it ran once, with
-no frustum yet, and left a NaN in the projection.
+```
+fbo: gl4es says 0, driver says 10 | driver viewport 756 -71 403 1126
+```
 
-**Tree imposters.** `Autosprite2Deform` took its facing from the view plane once
-per batch; it now takes it per sprite from the viewer's position. On a monitor
-those are the same thing. In a headset the imposter swings with the head while
-the tree beside it holds still — the second, worse tree leaning out of every
-real one.
+Zero in this process is the 16×16 pbuffer, and the viewport lies entirely outside
+it — so geometry landed in nothing, with no error raised anywhere.
+
+The VR layer now has gl4es generate, bind and delete these. **Three things must
+stay with the driver:**
+
+- the **swapchain texture attachment** — gl4es cannot attach a texture the
+  OpenXR runtime created. RTCWQuest hits this and documents it at
+  `TBXR_Common.c:290`, describing our exact symptom: *"the engine then renders
+  into nothing -> black eye buffer"*. (They must bypass gl4es explicitly because
+  ndk-build puts gl4es first in their link order; ours is already native because
+  `libGLESv3` precedes `libgl4es` in `DT_NEEDED`.)
+- the **blit's `GL_READ_FRAMEBUFFER` / `GL_DRAW_FRAMEBUFFER` bindings** — gl4es
+  takes `GL_READ_FRAMEBUFFER` as a note to itself and `return`s without binding
+  (`framebuffers.c:238`). Routing the blit through it silently empties the blit
+  and **kills the cutscenes**. This was done once by accident with an
+  over-broad macro; do not repeat it.
+- `glFramebufferTexture2D`, per the first point.
+
+`RE_SetDefaultFramebuffer` in renderergl1 binds **nothing**. It exists only to
+flush: gl4es batches geometry and issues it lazily, so work built for one target
+would otherwise arrive in whichever is bound when it finally goes out. The VR
+layer calls it *before* its own bind for that reason.
+
+### 5.8 gl4es must be built the way the reference builds it
+
+**This was the largest single blocker and it is the thing to remember.**
+
+With CMake's own flags, gl4es **rendered no geometry whatsoever** while clearing
+the same framebuffer perfectly. Measured, in the same buffer microseconds apart:
+
+```
+gl4es draw test: 144 red (clear), 0 green (drawn), 0 other
+```
+
+Matching RTCWQuest's `Android.mk` fixed it outright, with no engine-side change:
+
+```
+gl4es draw test: 108 red (clear), 36 green (drawn), 0 other
+```
+
+(36/144 is exactly the quarter the test quad covers.)
+
+Their flags, now in `cmake/libraries/gl4es.cmake`:
+
+```
+-DBCMHOST -DNOX11 -DNO_GBM -DDEFAULT_ES=2 -DNO_INIT_CONSTRUCTOR
+-O3 -fcommon -fvisibility=hidden -funwind-tables
+```
+
+**`ANDROID` is deliberately not among them.** gl4es's own CMakeLists adds
+`-DANDROID` whenever the NDK toolchain is in use, and ndk-build never does — so
+the reference has only ever been exercised without it. It is not cosmetic: it
+selects different code in the loader, in glx, and in `hardext`, which is where
+gl4es compiles a probe shader (`testGLSL`) to decide what its fixed function
+pipeline may emit. It comes from `add_definitions()`, a **directory** property,
+so it must be removed at the directory it was set on — overriding it on the
+target does not work.
+
+**Still to do: bisect which flag actually mattered.** `-DANDROID` is the strong
+suspicion. This is currently convergence on a known-good configuration, not a
+diagnosis.
 
 ---
 
-## 7. Instrumentation to remove
+## 6. The trap that cost this session, in bold
 
-All temporary, all in the way, none of it wanted once the renderer question is
-settled:
+**Every engine-side experiment run before 5.8 was worthless, because gl4es could
+not draw anything at all.**
 
-- `VR_TraceFrameTiming` and the whole `phase*` / `trace*` block in
-  `code/vr/vr_openxr.c`, plus `VR_TraceRenderTimes` / `VR_TraceSceneTimes` /
-  `VR_TraceViewTimes` / `VR_TraceHudTimes` / `VR_TraceHudParts` /
-  `VR_TraceEvent` / `VR_TraceState` and their declarations in `vr_common.h`.
-- The `glFinish()` in `VR_FinishEye`. **Expensive by design** — it exists to tell
-  work from queueing and must not ship.
-- `R_FontTraceBegin` / `R_FontTraceEnd` in `renderergl2/tr_font.cpp`.
-- The timing calls in `cl_scrn.cpp`, `cl_uiview3d.cpp`, `cl_ui.cpp`.
-- `vr_traceFrame` defaults to 1 because there is no console in a headset; it
-  should default to 0 once this is over.
+Under that broken gl4es, *any* test that ends "and nothing was drawn" returns the
+same answer regardless of what it is testing. On the strength of such results
+this session wrongly concluded, and acted on:
 
-Keep the shape of it somewhere, though. Being able to split a VR frame into
-wait / scene / issue / gpu on the device is what turned this from guesswork into
-one number, after several rounds of confident wrong answers.
+- that 32-bit indices were the problem (changed to 16-bit — see 8.1)
+- that the `glDrawElements` client-array path was broken (switched to
+  `qglArrayElement`; no change)
+- that compiled vertex arrays were broken (disabled them — see 8.2)
+- that `glDrawBuffer(GL_BACK)` on an FBO was discarding everything (stubbed it —
+  see 8.3)
+- that immediate mode worked while arrays did not, and later that *neither*
+  worked — two contradictory conclusions, both from invalid data
+
+**Before believing any negative rendering result, prove the renderer can draw at
+all.** The cheapest possible check, and the one that finally cracked this:
+ask gl4es for a `glClear` and then a flat untextured quad into the same buffer,
+and read the pixels back. A clear needs no shaders; a draw needs the whole
+pipeline. If the clear lands and the draw does not, stop looking at the engine.
+
+A second, dumber version of the same mistake: a probe gated on
+`primitives == 2` silently stopped running when a separate change flipped
+`primitives` to 1, and two rounds of "nothing drawn" results were actually
+"the probe never executed". **Verify instrumentation still fires after changing
+anything it depends on.**
 
 ---
 
-## 8. Working notes
+## 7. What is now positively proven working
+
+Measured on the device, after 5.8. Do not re-investigate these.
+
+- The OpenXR session, both eye swapchains and the flat quad layer. 90 fps.
+- The panel framebuffer is real, complete (`GL_FRAMEBUFFER_COMPLETE`), writable
+  and composited — a clear to blue showed as blue in the headset.
+- gl4es reaches that framebuffer: a clear to red showed as red.
+- gl4es renders geometry: a flat quad rendered, verified by pixel readback.
+- **The engine's own geometry renders** — with a flat-red override, the intro
+  logo screen before the cutscene appeared red in the headset.
+- Cutscenes render (immediate mode, `RE_StretchRaw`).
+- Controllers and the pointer beam render (VR layer's own GLES).
+- Both layers agree on the framebuffer: `gl4es says 10, driver says 10`.
+- The 2D setup is correct: viewport `0 0 1008 1056`, ortho `0 1008 1056 0`,
+  full scissor, `vrView.active` false during menus (so the HUD convergence code
+  in `R_VRAdjust2DOrtho` is *not* involved in the menu at all).
+- The geometry submitted for menu widgets is correct: 4 verts, 6 strip indices,
+  sensible coordinates, identity modelview, a correct ortho matching the
+  widget's own viewport, `glGetError() == 0` on every draw.
+
+---
+
+## 8. The open problem
+
+**The logo screen renders. The menu does not.** Both are flat 2D on the quad
+layer, `clc.state != CA_ACTIVE`, same framebuffer, same renderer, same frame
+path (`VR_UseScreenLayer()` → `VR_PrepareScreenLayer` → `UpdateStereoSide` →
+`re.EndFrame` → `VR_FinishScreenLayer`).
+
+A non-destructive 16×16 grid readback of the panel during the menu reports
+`0/256 samples lit` — nothing is written at all, not even black-on-black.
+
+### Ruled out this session
+
+- **The scissor.** `RE_Scissor` enables `GL_SCISSOR_TEST` and nothing ever
+  disables it, which looked like an excellent candidate for clipping the whole
+  UI away. Disabling it entirely changed nothing. (The test build for this is
+  still in the tree — see 9.)
+
+### Where to look next
+
+The menu is the only thing that draws **per widget**, each setting its own
+viewport and ortho through `re.Set2DWindow` from `cl_ui.cpp:1722` and
+`uiwidget.cpp`. A logged example:
+
+```
+viewport 756 -71 403 1126   ortho 0 403 1126 0
+```
+
+Note `y = -71` and a height of 1126 in a 1056-tall buffer. Those come from
+`uid.vidWidth`/`uid.vidHeight`, which is the UI's idea of the screen. **Check
+what those are set to against the 1008×1056 eye buffer** — if the UI is laying
+out for a different surface size, widget rectangles can land wholly outside the
+panel. That is the most promising untested lead.
+
+Also worth doing, cheaply:
+
+- Put the flat-red override back and walk from the logo screen into the menu,
+  watching where red stops appearing. The transition is the useful signal, and
+  the logo screen proves the machinery works either side of it.
+- Log every distinct viewport/ortho the menu sets over one second (deduplicated,
+  not sampled once a second — sampling has already misled here twice).
+- Check whether `Draw_StretchPic` (used by the logo) and `Draw_TilePic` /
+  `Draw_TilePicOffset` (used by widgets) differ in a way that matters; note the
+  latter divide by `uploadWidth`/`uploadHeight` for texcoords, which is
+  meaningless if the image failed to upload.
+
+---
+
+## 9. Diagnostic scaffolding currently in the working tree
+
+**None of this is committed. It must be removed or decided before shipping.**
+
+| File | What | Verdict |
+|---|---|---|
+| `renderergl1/tr_shade.c` | flat-red override in `R_DrawElements` (kills texture, blend, colour array) | **remove** — diagnostic only |
+| `renderergl1/tr_draw.c` | `RE_Scissor` disabled + logging | **remove** — scissor was ruled out, restore the real function |
+| `code/vr/vr_openxr.c` | panel grid-scan readback in `VR_FinishScreenLayer` | **remove** — diagnostic only |
+
+Three uncommitted changes are **not** scaffolding and need a decision:
+
+**9.1 `renderergl1/tr_local.h` — 16-bit indices.** `GL_INDEX_TYPE` changed to
+`GL_UNSIGNED_SHORT` under `USE_GL4ES`. Justified independently: ES 2.0 has no
+32-bit element indices without `GL_OES_element_index_uint`, and RTCWQuest does
+exactly this under `HAVE_GLES`. Costs nothing — indices only address within one
+tess batch and `SHADER_MAX_VERTEXES` is 2048 (theirs is 6000 with shorts).
+**Keep**, but note it was adopted on invalid evidence and has never been shown to
+be necessary.
+
+**9.2 `code/sdl/sdl_glimp.c` — compiled vertex arrays disabled under gl4es.**
+Adopted on invalid evidence (section 6). `qglLockArraysEXT` is currently never
+resolved, which also forces `r_primitives` to route 1 (`qglArrayElement`) instead
+of route 2 (`glDrawElements`). **Re-test both ways now that gl4es works.** The
+reference leaves CVA enabled.
+
+**9.3 `code/sdl/sdl_glimp.c` — `qglDrawBuffer`/`qglPolygonMode` stubbed under
+gl4es.** Independently defensible (the engine already stubs both on its ES path,
+and `GL_BACK` is not something an FBO has), but adopted on invalid evidence and
+never shown to be necessary. **Keep, low risk**, but do not credit it with
+anything.
+
+Also uncommitted: the `VR_BindFramebuffer` / `VR_GenFramebuffers` helpers in
+`vr_openxr.c` implementing 5.7. **These are real and should be committed.**
+
+---
+
+## 10. Working notes
 
 **Device.** `adb connect 192.168.1.92:43105`. It sleeps and the connection dies;
-reconnect with `adb disconnect` then `adb connect`. **Launch from inside the
-headset** — never `adb shell am start`.
+`adb disconnect` then `adb connect`. **Launch from inside the headset** — never
+`adb shell am start`.
 
-**Archived cvars will beat a changed default.** The config is exec'd before
-`VR_Init` runs, so `Cvar_Get` finds the cvar already there and keeps the old
-value. This cost a wasted device test when multisampling was reported off for two
-builds while still on. `VR_TuningCvar` in `vr_openxr.c` exists for this: it
-registers unarchived and forces the default every start. Use it for anything
-still being tuned — there is no console in the headset to correct a stale value
-with.
+A logcat wrapper that survives the sleep/wake cycle is worth keeping around; the
+connection drops constantly and a plain `adb logcat` dies with it.
 
-**Settled along the way**, so it is not re-investigated:
+**Archived cvars beat a changed default.** The config is exec'd before `VR_Init`,
+so `Cvar_Get` finds the cvar already there and keeps the old value. `VR_TuningCvar`
+in `vr_openxr.c` exists for this: it registers unarchived and forces the default
+every start. There is no console in a headset to correct a stale value with.
 
-- `XR_FB_display_refresh_rate` works; the display runs at 90Hz. It must be asked
-  for from the frame loop with the two call enumeration, not at `xrBeginSession`,
-  where the Oculus runtime reports no rates at all.
+**There is no console in a headset.** Every question has to be answered by
+something written to logcat, or by something visible enough to describe. Prefer
+pixel readbacks logged as numbers over anything that has to be seen — asking
+someone to catch a one-frame flash is a bad test, and was one here.
+
+**Settled, so not re-investigated:**
+
+- `XR_FB_display_refresh_rate` works; the display runs at 90 Hz. Ask for it from
+  the frame loop with the two-call enumeration, not at `xrBeginSession`.
 - MSAA via `GL_EXT_multisampled_render_to_texture` works and is off
-  (`vr_samples 0`). It was never the black patches on the ground — those are
-  still unexplained, and are the one open rendering defect that predates all of
-  this.
-- `vr_resolutionScale` is at 0.6 and should go back to 1 once the renderer is
-  settled, since fill rate was not the problem.
+  (`vr_samples 0`).
+- `vr_resolutionScale` is at **0.6** and should go back to 1 once the picture is
+  up — fill rate was never the problem.
+- A recurring `Fatal signal 11` at address `0x90` on a secondary thread at every
+  launch **predates all VR work** and the process survives it every time.
+
+**Once the menu draws**, the number this whole swap was for is still unmeasured:
+renderergl1's back-end cost per eye against rend2's 50–60 ms. Section 2 is the
+baseline to beat. The instrumentation for splitting a VR frame into
+wait/scene/issue/gpu is described in `VR_PORT_STATUS.md`.

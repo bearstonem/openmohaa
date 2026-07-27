@@ -41,6 +41,7 @@ around any renderer restart.
 #include "../client/client.h"
 #include "../sys/sys_android.h"
 
+#include <dlfcn.h>
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
 // GL_EXT_multisampled_render_to_texture is an ES extension and lives in the ES2
@@ -64,6 +65,98 @@ around any renderer restart.
 // here rather than by including the renderer's headers, which would pull the
 // whole of tr_local into a file that has no business seeing it.
 qboolean GLimp_MakeCurrent(void);
+
+
+
+/*
+gl4es has to agree with the driver about which framebuffer is bound.
+
+It keeps its own table of the framebuffers it created and renders from that,
+not from the driver's binding. A framebuffer the driver made is not in the
+table, so gl4es leaves its idea of the target at zero and draws there - and
+zero, in this process, is the 16x16 pbuffer the GL context is current against.
+The engine then submits correct geometry through correct matrices into a
+viewport that lies entirely outside a sixteen pixel square, and nothing is
+drawn anywhere, with no error raised.
+
+So gl4es generates, binds and deletes these. Two things deliberately stay with
+the driver:
+
+  - the attachment of the swapchain texture, because gl4es cannot attach a
+    texture the OpenXR runtime created (RTCWQuest hits this too and says so at
+    TBXR_Common.c:290);
+  - the read and draw bindings used by the blit, because gl4es takes
+    GL_READ_FRAMEBUFFER as a note to itself and returns without binding
+    anything - which silently empties the blit and takes the cutscenes with it.
+
+Only GL_FRAMEBUFFER goes through gl4es. The names are the driver's either way,
+since gl4es registers what the driver hands back.
+*/
+#ifdef USE_GL4ES
+static void (*gl4esGenFramebuffers)(GLsizei n, GLuint *framebuffers);
+static void (*gl4esBindFramebuffer)(GLenum target, GLuint framebuffer);
+static void (*gl4esDeleteFramebuffers)(GLsizei n, const GLuint *framebuffers);
+
+static qboolean VR_GL4ESFramebuffers(void)
+{
+	static qboolean tried;
+
+	if (!tried) {
+		void *gl4es = dlopen("libgl4es.so", RTLD_NOW | RTLD_LOCAL);
+
+		tried = qtrue;
+
+		if (gl4es) {
+			gl4esGenFramebuffers    = dlsym(gl4es, "glGenFramebuffers");
+			gl4esBindFramebuffer    = dlsym(gl4es, "glBindFramebuffer");
+			gl4esDeleteFramebuffers = dlsym(gl4es, "glDeleteFramebuffers");
+		}
+
+		if (!gl4esGenFramebuffers || !gl4esBindFramebuffer || !gl4esDeleteFramebuffers) {
+			Com_Printf("VR: no gl4es framebuffer entry points; the renderer and the "
+				"driver will disagree about the target and nothing will be drawn\n");
+			gl4esBindFramebuffer = NULL;
+		}
+	}
+
+	return gl4esBindFramebuffer != NULL;
+}
+#endif
+
+static void VR_GenFramebuffers(GLsizei n, GLuint *framebuffers)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers()) {
+		gl4esGenFramebuffers(n, framebuffers);
+		return;
+	}
+#endif
+	glGenFramebuffers(n, framebuffers);
+}
+
+static void VR_DeleteFramebuffers(GLsizei n, const GLuint *framebuffers)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers()) {
+		gl4esDeleteFramebuffers(n, framebuffers);
+		return;
+	}
+#endif
+	glDeleteFramebuffers(n, framebuffers);
+}
+
+// GL_FRAMEBUFFER only; see above. The blit's read and draw bindings must not
+// come through here.
+static void VR_BindFramebuffer(GLuint framebuffer)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers()) {
+		gl4esBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+		return;
+	}
+#endif
+	glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+}
 
 typedef struct {
 	XrSwapchain     handle;
@@ -781,7 +874,7 @@ VR_DestroySwapchain
 static void VR_DestroySwapchain(vrSwapchain_t *swapchain)
 {
 	if (swapchain->frameBuffers) {
-		glDeleteFramebuffers(swapchain->imageCount, swapchain->frameBuffers);
+		VR_DeleteFramebuffers(swapchain->imageCount, swapchain->frameBuffers);
 		Z_Free(swapchain->frameBuffers);
 		swapchain->frameBuffers = NULL;
 	}
@@ -910,7 +1003,7 @@ static qboolean VR_CreateSwapchain(vrSwapchain_t *swapchain, uint32_t width, uin
 	swapchain->frameBuffers = Z_Malloc(swapchain->imageCount * sizeof(GLuint));
 
 	glGenRenderbuffers(swapchain->imageCount, swapchain->depthBuffers);
-	glGenFramebuffers(swapchain->imageCount, swapchain->frameBuffers);
+	VR_GenFramebuffers(swapchain->imageCount, swapchain->frameBuffers);
 
 	// Both attachments have to carry the same sample count or the framebuffer
 	// is incomplete, so the depth renderbuffer is multisampled alongside the
@@ -929,7 +1022,7 @@ static qboolean VR_CreateSwapchain(vrSwapchain_t *swapchain, uint32_t width, uin
 		}
 		glBindRenderbuffer(GL_RENDERBUFFER, 0);
 
-		glBindFramebuffer(GL_FRAMEBUFFER, swapchain->frameBuffers[i]);
+		VR_BindFramebuffer(swapchain->frameBuffers[i]);
 		if (samples > 1) {
 			vr.glFramebufferTexture2DMultisampleEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
 				swapchain->images[i].image, 0, samples);
@@ -942,12 +1035,12 @@ static qboolean VR_CreateSwapchain(vrSwapchain_t *swapchain, uint32_t width, uin
 
 		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
 			Com_Printf("OpenXR: incomplete eye framebuffer %u\n", i);
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			VR_BindFramebuffer(0);
 			return qfalse;
 		}
 	}
 
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	VR_BindFramebuffer(0);
 	return qtrue;
 }
 
@@ -1129,13 +1222,14 @@ void VR_CreateSession(void)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glBindTexture(GL_TEXTURE_2D, 0);
 
-	glGenFramebuffers(1, &vr.uiFramebuffer);
-	glBindFramebuffer(GL_FRAMEBUFFER, vr.uiFramebuffer);
+	VR_GenFramebuffers(1, &vr.uiFramebuffer);
+	VR_BindFramebuffer(vr.uiFramebuffer);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, vr.uiTexture, 0);
 	glDisable(GL_SCISSOR_TEST);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	VR_BindFramebuffer(0);
 
 	VR_CreateActions();
 	VR_CreateBeam();
@@ -2007,7 +2101,7 @@ void VR_DestroySession(void)
 	VR_DestroyBeam();
 
 	if (vr.uiFramebuffer) {
-		glDeleteFramebuffers(1, &vr.uiFramebuffer);
+		VR_DeleteFramebuffers(1, &vr.uiFramebuffer);
 		vr.uiFramebuffer = 0;
 	}
 
@@ -2438,7 +2532,7 @@ void VR_PrepareEye(int eye)
 		re.SetDefaultFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
 	}
 
-	glBindFramebuffer(GL_FRAMEBUFFER, swapchain->frameBuffers[swapchain->acquiredIndex]);
+	VR_BindFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
 	glViewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
 	glScissor(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
 	glDisable(GL_SCISSOR_TEST);
@@ -2587,7 +2681,7 @@ void VR_FinishEye(int eye)
 		re.SetDefaultFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
 	}
 
-	glBindFramebuffer(GL_FRAMEBUFFER, swapchain->frameBuffers[swapchain->acquiredIndex]);
+	VR_BindFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
 	glDisable(GL_SCISSOR_TEST);
 
 	// Hands and the pointer beam go in on top of the world, but only while the
@@ -2621,7 +2715,7 @@ void VR_FinishEye(int eye)
 		re.SetDefaultFramebuffer(0);
 	}
 
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	VR_BindFramebuffer(0);
 
 	// Back to the flat projection, so anything drawn outside an eye pass - the
 	// screen layer, a loading screen - is not left with this eye's frustum.
@@ -3225,7 +3319,7 @@ static void VR_RenderPointerLayer(void)
 			return;
 		}
 
-		glBindFramebuffer(GL_FRAMEBUFFER, swapchain->frameBuffers[swapchain->acquiredIndex]);
+		VR_BindFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
 		glViewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
 		glDisable(GL_SCISSOR_TEST);
 		// Cleared to nothing, so this layer is the beam and nothing else. It
@@ -3238,7 +3332,7 @@ static void VR_RenderPointerLayer(void)
 
 		VR_DrawBeam(eye, vr.beamVerts, vr.beamVertexCount);
 
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		VR_BindFramebuffer(0);
 
 		XR_CHECK(xrReleaseSwapchainImage(swapchain->handle, &releaseInfo));
 
@@ -3345,8 +3439,9 @@ void VR_PrepareScreenLayer(void)
 	// Deliberately not cleared: the engine's 2D path treats the screen as
 	// something that persists between frames, and this buffer is the only
 	// place that is true.
-	glBindFramebuffer(GL_FRAMEBUFFER, vr.uiFramebuffer);
+	VR_BindFramebuffer(vr.uiFramebuffer);
 	glViewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
+
 }
 
 /*
@@ -3364,6 +3459,39 @@ void VR_FinishScreenLayer(void)
 	if (!vr.frameStarted) {
 		return;
 	}
+
+	// TEMPORARY, and deliberately non-destructive - paints nothing. gl4es is now
+	// known to draw, so the question is whether the engine's own 2D reaches this
+	// buffer. Counts samples that are not black.
+	{
+		static int panelReport;
+		int panelNow = Sys_Milliseconds();
+
+		if (panelNow - panelReport > 1000) {
+			unsigned char px[4];
+			int gx, gy, lit = 0;
+			const int bw = (int)vr.uiSwapchain.width;
+			const int bh = (int)vr.uiSwapchain.height;
+
+			panelReport = panelNow;
+			glBindFramebuffer(GL_FRAMEBUFFER, vr.uiFramebuffer);
+
+			for (gy = 0; gy < 16; gy++) {
+				for (gx = 0; gx < 16; gx++) {
+					glReadPixels(gx * (bw / 16) + bw / 32, gy * (bh / 16) + bh / 32,
+						1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+
+					if (px[0] > 8 || px[1] > 8 || px[2] > 8) {
+						lit++;
+					}
+				}
+			}
+
+			Com_Printf("VR panel: %d/256 samples lit\n", lit);
+		}
+	}
+
+
 
 	if (re.SetDefaultFramebuffer) {
 		re.SetDefaultFramebuffer(0);
@@ -3393,13 +3521,13 @@ void VR_FinishScreenLayer(void)
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
 	// The compositor reads alpha; the engine leaves whatever the scene wrote.
-	glBindFramebuffer(GL_FRAMEBUFFER, swapchain->frameBuffers[swapchain->acquiredIndex]);
+	VR_BindFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
 	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
 	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	VR_BindFramebuffer(0);
 
 	memset(&releaseInfo, 0, sizeof(releaseInfo));
 	releaseInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
@@ -3438,7 +3566,7 @@ static void VR_ResolveWristPanel(GLuint target)
 	wasBlend = glIsEnabled(GL_BLEND);
 	wasCull = glIsEnabled(GL_CULL_FACE);
 
-	glBindFramebuffer(GL_FRAMEBUFFER, target);
+	VR_BindFramebuffer(target);
 	glViewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
 
 	glDisable(GL_DEPTH_TEST);
@@ -3506,7 +3634,7 @@ void VR_PrepareWristPanel(void)
 		re.SetDefaultFramebuffer(vr.uiFramebuffer);
 	}
 
-	glBindFramebuffer(GL_FRAMEBUFFER, vr.uiFramebuffer);
+	VR_BindFramebuffer(vr.uiFramebuffer);
 	glViewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
 	glDisable(GL_SCISSOR_TEST);
 
@@ -3567,7 +3695,7 @@ void VR_FinishWristPanel(void)
 	// is what made the text vanish while the compass survived.
 	VR_ResolveWristPanel(swapchain->frameBuffers[swapchain->acquiredIndex]);
 
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	VR_BindFramebuffer(0);
 
 	XR_CHECK(xrReleaseSwapchainImage(swapchain->handle, &releaseInfo));
 
