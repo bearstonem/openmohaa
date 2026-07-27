@@ -98,13 +98,6 @@ cvar_t	*r_ext_max_anisotropy;
 cvar_t	*r_forceClampToEdge;
 cvar_t	*r_geForce3WorkAround;
 cvar_t	*r_reset_tc_array;
-cvar_t	*r_flatColor;
-cvar_t	*r_traceSurf;
-cvar_t	*r_forceGenericStage;
-cvar_t	*r_noFog;
-cvar_t	*r_noCull;
-cvar_t	*r_noDepth;
-cvar_t	*r_invertCull;
 
 cvar_t	*r_ignoreGLErrors;
 cvar_t	*r_logFile;
@@ -1354,31 +1347,6 @@ void R_Register( void )
 	r_forceClampToEdge = ri.Cvar_Get("r_forceClampToEdge", "0", CVAR_ROM);
 	r_geForce3WorkAround = ri.Cvar_Get("r_geForce3WorkAround", "1", CVAR_ARCHIVE);
 	r_reset_tc_array = ri.Cvar_Get("r_reset_tc_array", "1", CVAR_ARCHIVE);
-	// Diagnostic. Draws every surface as flat opaque red - white texture, no
-	// blend, no vertex colour - so that "the geometry never rasterised" can be
-	// told apart from "it rasterised and something made it invisible".
-	// Unarchived on purpose: it must never survive into a config, since there is
-	// no console in a headset to turn it back off with.
-	r_flatColor = ri.Cvar_Get("r_flatColor", "0", CVAR_TEMP);
-	// Diagnostic. Reports the vertex count, index range and bounding box of
-	// the first few 3D surfaces of one frame a second, so the geometry
-	// reaching GL can be checked as numbers rather than guessed at from a
-	// photograph of a headset.
-	r_traceSurf = ri.Cvar_Get("r_traceSurf", "0", CVAR_TEMP);
-	// Send every surface through RB_StageIteratorGeneric instead of the
-	// specialised iterators. Diagnostic first, possibly a fix.
-	r_forceGenericStage = ri.Cvar_Get("r_forceGenericStage", "0", CVAR_TEMP);
-	// Fixed function fog off. MOHAA drives real GL_FOG through gl4es, with a
-	// range taken from the map's farplane, and a collapsed range renders
-	// everything as flat fog colour.
-	r_noFog = ri.Cvar_Get("r_noFog", "0", CVAR_TEMP);
-	// Backface culling off, to tell inverted winding from not drawing.
-	r_noCull = ri.Cvar_Get("r_noCull", "0", CVAR_TEMP);
-	// Depth test off, for the same reason as r_noCull: separating
-	// "rejected" from "never drawn".
-	r_noDepth = ri.Cvar_Get("r_noDepth", "0", CVAR_TEMP);
-	// Swap the culled face, to prove whether world winding is inverted.
-	r_invertCull = ri.Cvar_Get("r_invertCull", "0", CVAR_TEMP);
 
 	r_picmip = ri.Cvar_Get ("r_picmip", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_picmip_cap = ri.Cvar_Get ("r_picmip_cap", "0", CVAR_ARCHIVE | CVAR_LATCH );

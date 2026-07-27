@@ -22,7 +22,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_shade.c
 
 #include "tr_local.h"
-#include <dlfcn.h>
 
 /*
 
@@ -1453,357 +1452,11 @@ static void ComputeTexCoords( shaderStage_t *pStage ) {
 }
 
 /*
-===============
-R_FlatColorPush / R_FlatColorPop
-
-Diagnostic: draw the surface as flat opaque red, so that the question "did this
-geometry rasterise at all" can be asked separately from "is the texture, the
-vertex colour or the blend making it invisible".
-
-Every piece of state this touches is either restored here or set through the
-tracker that owns it, which is not a detail. The previous version of this probe
-turned GL_BLEND and GL_TEXTURE_2D off behind GL_State's and GL_Bind's backs and
-restored them on a branch that was never taken - so it did not disable itself at
-the end of the draw, it disabled blending for the rest of the process, and every
-observation made while it was in the tree describes a renderer it had broken.
-===============
-*/
-static int r_flatColorSurf;
-
-static void R_FlatColorPush( void )
-{
-	// A single colour is no use in a world: "the ground is missing" and
-	// "everything is red" look identical. Cycling a palette per surface makes
-	// the shapes themselves legible, which is the whole question.
-	// No white and no black in here on purpose. Both are answers in their own
-	// right - white is what the ground currently shows and black is what an
-	// unclear eye buffer shows - and a palette entry that collides with either
-	// makes the probe unable to tell its own output from the thing it is
-	// measuring.
-	static const float palette[8][3] = {
-		{ 1.0f, 0.2f, 0.2f }, { 0.2f, 1.0f, 0.2f },
-		{ 0.3f, 0.5f, 1.0f }, { 1.0f, 1.0f, 0.2f },
-		{ 0.2f, 1.0f, 1.0f }, { 1.0f, 0.3f, 1.0f },
-		{ 1.0f, 0.6f, 0.1f }, { 0.6f, 0.2f, 0.9f },
-	};
-	const float *c = palette[( r_flatColorSurf++ ) & 7];
-
-	// The whole open question is whether world surfaces rasterise at all, and
-	// every previous answer was inferred from the shape of coloured blobs -
-	// wrongly, twice. The world entity gets pure red and nothing else does, so
-	// one glance settles it.
-	static const float worldRed[3] = { 1.0f, 0.0f, 0.0f };
-
-	if ( backEnd.currentEntity == &tr.worldEntity ) {
-		c = worldRed;
-	}
-
-	// Through GL_State, so glStateBits agrees and the next stage's own
-	// GL_State call computes a correct difference from here. Opaque and depth
-	// tested in the world - without the depth buffer everything overlaps
-	// everything and the result is unreadable - but depth test off in 2D,
-	// which is what the UI's own stages ask for.
-	GL_State( backEnd.in2D ? GLS_DEPTHTEST_DISABLE : GLS_DEPTHMASK_TRUE );
-
-	// TMU1 keeps whatever a previous multitextured surface left enabled, and a
-	// lightmap there modulates the flat colour down towards black - which is
-	// why the palette came back dark the first time and read as a shading
-	// problem it was not.
-	if ( qglActiveTextureARB ) {
-		GL_SelectTexture( 1 );
-		qglDisable( GL_TEXTURE_2D );
-		GL_SelectTexture( 0 );
-	}
-
-	// Tracked by glState.currenttextures; the next surface rebinds.
-	GL_Bind( tr.whiteImage );
-
-	qglDisableClientState( GL_COLOR_ARRAY );
-	qglColor4f( c[0], c[1], c[2], 1.0f );
-}
-
-static void R_FlatColorPop( void )
-{
-	qglEnableClientState( GL_COLOR_ARRAY );
-}
-
-
-/*
-===============
-R_DriverGet
-
-GL state as the *driver* sees it, not as gl4es reports it.
-
-gl4es answers glGetIntegerv for GL_CULL_FACE_MODE, GL_FRONT_FACE and
-GL_MODELVIEW_MATRIX out of its own tables (src/gl/getter.c), exactly as it
-answers glGetString from constants - the trap already recorded in section 5.5 of
-the handoff. So asking through qgl and comparing against the engine compares the
-engine with gl4es's copy of the engine, which agrees by construction and proves
-nothing. Two "GL and the engine agree" measurements in this session were that,
-and were worthless.
-
-gl4es also drops calls its cache considers redundant - glCullFace returns early
-when the mode matches (src/gl/face.c:14), as do glDepthMask, glDepthFunc,
-glBlendFunc, glColorMask, glScissor and glViewport. So the driver can be holding
-something the engine never asked for and gl4es will still report the engine's
-value back.
-
-These resolve straight out of libGLESv3, past gl4es entirely.
-===============
-*/
-static void (*driverGetIntegerv)(GLenum, GLint *);
-static GLboolean (*driverIsEnabled)(GLenum);
-
-static qboolean R_DriverGet( void )
-{
-	static qboolean tried;
-
-	if ( !tried ) {
-		void *lib = dlopen( "libGLESv3.so", RTLD_NOW | RTLD_LOCAL );
-
-		tried = qtrue;
-		if ( !lib ) {
-			lib = dlopen( "libGLESv2.so", RTLD_NOW | RTLD_LOCAL );
-		}
-		if ( lib ) {
-			driverGetIntegerv = dlsym( lib, "glGetIntegerv" );
-			driverIsEnabled   = dlsym( lib, "glIsEnabled" );
-		}
-	}
-
-	return driverGetIntegerv && driverIsEnabled;
-}
-
-/*
-===============
-R_TraceSurface
-
-Prints what the back end is actually about to draw, for the first few surfaces
-of one frame a second.
-
-The point is to separate "the vertices reaching GL are wrong" from "the vertices
-are right and something downstream mishandles them". Both routes through
-R_DrawElements mangle the world identically while the 2D path is perfect, and
-identical breakage on two very different submission paths says the fault is
-already in the data - but that is an inference, and this measures it.
-
-The bounding box is the number to read first. World coordinates in this game run
-to a few thousand units; anything enormous, tiny or non-finite means the surface
-code filled tess wrongly and GL is blameless. Index range against numVertexes is
-the other half: an index at or past the vertex count reads off the end of the
-array, which is exactly what a stretched polygon looks like.
-===============
-*/
-static void R_TraceSurface( shaderCommands_t *input, const char *iter )
-{
-	static int lastTrace;
-	static int shown;
-	int   now, i, j;
-	int   minIdx = 0x7fffffff, maxIdx = -1;
-	int   bad = 0;
-	vec3_t mins, maxs;
-
-	// The 2D path is known good and would drown everything else out.
-	if ( backEnd.in2D ) {
-		return;
-	}
-
-	now = ri.Milliseconds();
-	if ( now - lastTrace > 1000 ) {
-		lastTrace = now;
-		shown = 0;
-	}
-	if ( shown >= 8 || !input->numVertexes || !input->numIndexes ) {
-		return;
-	}
-	shown++;
-
-	for ( i = 0; i < input->numIndexes; i++ ) {
-		const int idx = (int)input->indexes[i];
-
-		if ( idx < minIdx ) minIdx = idx;
-		if ( idx > maxIdx ) maxIdx = idx;
-	}
-
-	ClearBounds( mins, maxs );
-	for ( i = 0; i < input->numVertexes; i++ ) {
-		for ( j = 0; j < 3; j++ ) {
-			const float v = input->xyz[i][j];
-
-			// NaN compares false against itself.
-			if ( v != v || v > 1.0e9f || v < -1.0e9f ) {
-				bad++;
-				break;
-			}
-		}
-		AddPointToBounds( input->xyz[i], mins, maxs );
-	}
-
-	// Where the vertices actually land on screen, which is the question the
-	// world space bounding box above cannot answer. Every previous round read
-	// "sane box, indices in range" as "the geometry is fine" - and it was fine,
-	// in world space, while arriving somewhere else entirely in clip space.
-	//
-	// Clip coordinates divided by w are normalised device coordinates: x and y
-	// inside [-1,1] are on screen. A world whose corners come out clustered in
-	// a tiny region is being drawn small and far away, which is what this looks
-	// like, and then no amount of state explains it - only the matrix does.
-	{
-		vec4_t eye, clip;
-		float  ndc[3] = { 0, 0, 0 };
-		float  nmin[3] = {  1e30f,  1e30f,  1e30f };
-		float  nmax[3] = { -1e30f, -1e30f, -1e30f };
-		int    beyondFar = 0, behind = 0, k;
-
-		// Over every vertex, not just the first. One vertex cannot tell a
-		// collapsed world from one that happens to lie along the view axis,
-		// and that ambiguity is the whole question: a surface whose world box
-		// spans thousands of units but whose NDC box is a speck is being
-		// scaled into nothing.
-		for ( k = 0; k < input->numVertexes; k++ ) {
-			int a;
-
-			R_TransformModelToClip( input->xyz[k], backEnd.ori.modelMatrix,
-				backEnd.viewParms.projectionMatrix, eye, clip );
-
-			if ( clip[3] <= 0.0f ) {
-				behind++;
-				continue;
-			}
-			if ( clip[2] > clip[3] ) {
-				beyondFar++;
-			}
-			for ( a = 0; a < 3; a++ ) {
-				const float n = clip[a] / clip[3];
-
-				if ( n < nmin[a] ) nmin[a] = n;
-				if ( n > nmax[a] ) nmax[a] = n;
-			}
-		}
-
-		// What GL actually has for culling. The engine asks for a cull face via
-		// GL_Cull and re-evaluates it every view (glState.faceCulling = -1 in
-		// RB_BeginDrawingView), so if the driver disagrees, the request was
-		// dropped between here and it - which under gl4es means its cache said
-		// the value was already set.
-		//
-		// Q3's convention is inverted from GL's: CT_FRONT_SIDED culls GL_FRONT,
-		// because its front facing polygons are clockwise. So "GLcull 1028"
-		// (GL_FRONT) with a front sided shader is correct, and GL_BACK is not.
-		{
-			GLint   cullMode = 0, frontFace = 0;
-			GLboolean cullOn = qglIsEnabled( GL_CULL_FACE );
-
-			qglGetIntegerv( GL_CULL_FACE_MODE, &cullMode );
-			qglGetIntegerv( GL_FRONT_FACE, &frontFace );
-
-			// Determinant of the modelview's rotation. Negative means the view
-			// basis is left handed, every triangle's screen space winding is
-			// flipped, and single sided geometry is culled from the side it
-			// should be visible from - which is what a mirror does, and why
-			// GL_Cull already swaps GL_FRONT/GL_BACK for backEnd.viewParms.isMirror.
-			const float *m = backEnd.ori.modelMatrix;
-			const float det =
-				  m[0] * ( m[5] * m[10] - m[9] * m[6] )
-				- m[4] * ( m[1] * m[10] - m[9] * m[2] )
-				+ m[8] * ( m[1] * m[6]  - m[5] * m[2] );
-
-			// The driver's own answer, next to gl4es's. If these disagree, the
-			// engine's request never reached the hardware and gl4es reported
-			// back what it was asked rather than what is set. A driver mode of
-			// 0x0408 (GL_FRONT_AND_BACK) would cull everything whichever face
-			// the engine names, while leaving two sided surfaces - which is the
-			// exact signature seen: world invisible with culling on either way,
-			// models unaffected because they are CT_TWO_SIDED.
-			if ( R_DriverGet() ) {
-				GLint drvMode = 0, drvFront = 0;
-
-				driverGetIntegerv( GL_CULL_FACE_MODE, &drvMode );
-				driverGetIntegerv( GL_FRONT_FACE, &drvFront );
-
-				ri.Printf( PRINT_ALL,
-					"  DRIVER: cullenabled %d cullmode 0x%04x frontface 0x%04x\n",
-					(int)driverIsEnabled( GL_CULL_FACE ), drvMode, drvFront );
-			}
-
-			ri.Printf( PRINT_ALL,
-				"  gl4es: GLenabled %d GLmode 0x%04x frontface 0x%04x | engine faceCulling %d cullType %d"
-				" | mvdet %.3f isMirror %d\n",
-				(int)cullOn, cullMode, frontFace,
-				glState.faceCulling,
-				input->shader ? (int)input->shader->cullType : -1,
-				det, (int)backEnd.viewParms.isMirror );
-		}
-
-		// What GL actually has, not what the engine thinks it set.
-		//
-		// Every NDC number above was computed from backEnd.ori.modelMatrix,
-		// which is the engine's own copy. If qglLoadMatrixf did not land - and
-		// under gl4es there are two matrix stacks and a cache between the
-		// engine and the driver - then that arithmetic is right and the picture
-		// is still wrong, which is exactly the contradiction here: the maths
-		// says this surface spans the screen, the headset shows a speck.
-		{
-			float glMv[16], glProj[16];
-			int   m;
-			float worst = 0.0f;
-
-			qglGetFloatv( GL_MODELVIEW_MATRIX, glMv );
-			qglGetFloatv( GL_PROJECTION_MATRIX, glProj );
-
-			for ( m = 0; m < 16; m++ ) {
-				const float d = fabs( glMv[m] - backEnd.ori.modelMatrix[m] );
-
-				if ( d > worst ) worst = d;
-			}
-
-			ri.Printf( PRINT_ALL,
-				"  GLmv org %.0f %.0f %.0f (engine %.0f %.0f %.0f) maxdiff %.3f"
-				" | GLproj %.3f %.3f %.3f %.3f (engine %.3f %.3f %.3f %.3f)\n",
-				glMv[12], glMv[13], glMv[14],
-				backEnd.ori.modelMatrix[12], backEnd.ori.modelMatrix[13],
-				backEnd.ori.modelMatrix[14], worst,
-				glProj[0], glProj[5], glProj[10], glProj[14],
-				backEnd.viewParms.projectionMatrix[0],
-				backEnd.viewParms.projectionMatrix[5],
-				backEnd.viewParms.projectionMatrix[10],
-				backEnd.viewParms.projectionMatrix[14] );
-		}
-
-		R_TransformModelToClip( input->xyz[0], backEnd.ori.modelMatrix,
-			backEnd.viewParms.projectionMatrix, eye, clip );
-
-		if ( clip[3] != 0.0f ) {
-			ndc[0] = clip[0] / clip[3];
-			ndc[1] = clip[1] / clip[3];
-			ndc[2] = clip[2] / clip[3];
-		}
-
-		ri.Printf( PRINT_ALL,
-			"surf [%s] %s '%s': %d verts %d idx | box %.0f %.0f %.0f .. %.0f %.0f %.0f"
-			" | ndcbox %.2f %.2f .. %.2f %.2f z %.4f..%.4f | far %d behind %d | w %.1f | mvorg %.0f %.0f %.0f\n",
-			iter,
-			backEnd.currentEntity == &tr.worldEntity ? "WORLD" : "ent",
-			input->shader ? input->shader->name : "?",
-			input->numVertexes, input->numIndexes,
-			mins[0], mins[1], mins[2], maxs[0], maxs[1], maxs[2],
-			nmin[0], nmin[1], nmax[0], nmax[1], nmin[2], nmax[2],
-			beyondFar, behind, clip[3],
-			backEnd.ori.modelMatrix[12], backEnd.ori.modelMatrix[13],
-			backEnd.ori.modelMatrix[14] );
-	}
-}
-
-/*
 ** RB_IterateStagesGeneric
 */
 static void RB_IterateStagesGeneric( shaderCommands_t *input )
 {
 	int stage;
-
-	if (r_traceSurf->integer) {
-		R_TraceSurface( input, "generic" );
-	}
 
 	for (stage = 0; stage < MAX_SHADER_STAGES; stage++)
 	{
@@ -1811,13 +1464,6 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 
 		if (!pStage)
 		{
-			break;
-		}
-
-		// One flat pass per surface. Letting every stage through would paint
-		// each one a different palette colour on top of the last, which is
-		// noise rather than geometry.
-		if (r_flatColor->integer && stage > 0) {
 			break;
 		}
 
@@ -1840,12 +1486,7 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 		//
 		// do multitexture
 		//
-		// Multitextured surfaces are the world - every lightmapped wall, road
-		// and patch of ground. DrawMultitextured never consulted r_flatColor,
-		// so the probe covered models and nothing else, and reported on a set
-		// of surfaces that were never in question. Send them down the single
-		// texture branch while it is on.
-		if (pStage->bundle[1].image[0] != 0 && !r_flatColor->integer)
+		if (pStage->bundle[1].image[0] != 0)
 		{
 			DrawMultitextured(input, stage);
 		}
@@ -1882,16 +1523,7 @@ static void RB_IterateStagesGeneric( shaderCommands_t *input )
 			//
 			// draw
 			//
-			if (r_flatColor->integer)
-			{
-				R_FlatColorPush();
-				R_DrawElements(input->numIndexes, input->indexes);
-				R_FlatColorPop();
-			}
-			else
-			{
-				R_DrawElements(input->numIndexes, input->indexes);
-			}
+			R_DrawElements(input->numIndexes, input->indexes);
 		}
 		// allow skipping out to show just lightmaps during development
 		if (r_lightmap->integer && (pStage->bundle[0].isLightmap || pStage->bundle[1].isLightmap || pStage->bundle[0].vertexLightmap))
@@ -2025,10 +1657,6 @@ void RB_StageIteratorVertexLitTextureUnfogged( void )
 
 	shader = input->shader;
 
-	if (r_traceSurf->integer) {
-		R_TraceSurface( input, "vertexlit" );
-	}
-
 	if (backEnd.currentSphere->TessFunction && r_drawspherelights->integer)
 	{
 		//
@@ -2113,22 +1741,6 @@ void RB_StageIteratorLightmappedMultitextureUnfogged( void ) {
 	shaderCommands_t *input;
 
 	input = &tess;
-
-	if (r_traceSurf->integer) {
-		R_TraceSurface( input, "lightmapped" );
-	}
-
-	// Honoured here as well as in the generic path, so that asking "does this
-	// rasterise" does not also mean changing which iterator runs. Those were
-	// tangled together in every previous flat colour test.
-	if (r_flatColor->integer) {
-		GL_Cull( input->shader->cullType );
-		qglVertexPointer( 3, GL_FLOAT, 16, input->xyz );
-		R_FlatColorPush();
-		R_DrawElements( input->numIndexes, input->indexes );
-		R_FlatColorPop();
-		return;
-	}
 
 	//
 	// log this call
@@ -2267,19 +1879,7 @@ void RB_EndSurface( void ) {
 	//
 	// call off to shader specific tess end function
 	//
-	// Everything that renders correctly on gl4es goes through
-	// RB_StageIteratorGeneric; everything broken goes through one of the two
-	// "optimal" iterators, which point GL at different arrays - stride 16 into
-	// tess.texCoords rather than stride 0 into tess.svars.texcoords, and
-	// tess.constantColor255 rather than the computed colours. r_forceGenericStage
-	// sends every surface down the working one, which either fixes the world or
-	// rules those two functions out. The sky keeps its own iterator: it does not
-	// build tess the way the others do.
-	if ( r_forceGenericStage->integer && tess.currentStageIteratorFunc != RB_StageIteratorSky ) {
-		RB_StageIteratorGeneric();
-	} else {
-		tess.currentStageIteratorFunc();
-	}
+	tess.currentStageIteratorFunc();
 
 	if (!(tr.refdef.rdflags & RDF_NOWORLDMODEL) && !backEnd.in2D)
 	{

@@ -530,7 +530,6 @@ static struct {
 
 static cvar_t *vr_traceTracking;
 static cvar_t *vr_traceFrame;
-static cvar_t *vr_debugPanel;
 static cvar_t *vr_captureEye;
 
 /*
@@ -869,16 +868,9 @@ qboolean VR_Init(void)
 	// enough to otherwise swallow the player's arm.
 	vr.vr_wristDistance = VR_TuningCvar("vr_wristDistance", "0.16");
 	vr.vr_wristBack = VR_TuningCvar("vr_wristBack", "0.07");
-	// On while the menu is still black. Clears the flat panel to magenta before
-	// the engine draws into it and sorts a grid of samples afterwards, so that
-	// "the UI never got here" and "the UI got here and drew black" stop being
-	// the same measurement - which is what the readback that reported 0/256 was
-	// actually doing. Turn it off once the picture is up: it costs a clear and
-	// 256 glReadPixels a second, and a magenta panel is not a shipping menu.
-	vr_debugPanel = VR_TuningCvar("vr_debugPanel", "1");
 	// Dumps the left eye to main/vrshotN.tga every two seconds, so what the
 	// renderer produced can be looked at directly instead of described.
-	vr_captureEye = VR_TuningCvar("vr_captureEye", "1");
+	vr_captureEye = VR_TuningCvar("vr_captureEye", "0");
 	vr_traceTracking = Cvar_Get("vr_traceTracking", "0", 0);
 	// On by default while the frame budget is still an open question; there is
 	// no console in the headset to turn it on with when it is wanted.
@@ -3718,24 +3710,6 @@ void VR_PrepareScreenLayer(void)
 	VR_BindFramebuffer(vr.uiFramebuffer);
 	VR_Viewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
 
-	// Diagnostic, and the reason the menu is still unexplained.
-	//
-	// Because the panel is never cleared, "the UI drew nothing" and "the UI drew
-	// black over what was already there" leave an identical buffer, and the
-	// readback in VR_FinishScreenLayer - which counted samples brighter than 8 -
-	// could not tell them apart. It reported 0/256 and that was written down as
-	// "nothing is written at all". It is not evidence for that. The frame before
-	// the menu is the end of a cinematic, which fades to black, so an untouched
-	// panel is black too.
-	//
-	// Starting from a colour nothing in this game draws makes the two cases
-	// different, both in the log and in the headset: magenta means the UI never
-	// arrived, black means it arrived and painted black.
-	if (vr_debugPanel && vr_debugPanel->integer) {
-		VR_GLDisable(GL_SCISSOR_TEST);
-		glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-	}
 }
 
 /*
@@ -3754,55 +3728,6 @@ void VR_FinishScreenLayer(void)
 		return;
 	}
 
-	// Diagnostic. Reads the panel back on a 16x16 grid and sorts each sample
-	// into the three answers the magenta clear in VR_PrepareScreenLayer makes
-	// distinguishable:
-	//
-	//   untouched - the UI never reached this buffer at all
-	//   black     - it reached it and drew black
-	//   drawn     - it reached it and drew something
-	//
-	// The previous version of this counted only "brighter than 8" against a
-	// buffer that is never cleared, so the first two answers were the same
-	// number and the menu looked like it was drawing nothing when the evidence
-	// did not say that.
-	if (vr_debugPanel && vr_debugPanel->integer) {
-		static int panelReport;
-		int panelNow = Sys_Milliseconds();
-
-		if (panelNow - panelReport > 1000) {
-			unsigned char px[4];
-			int gx, gy;
-			int untouched = 0, black = 0, drawn = 0;
-			const int bw = (int)vr.uiSwapchain.width;
-			const int bh = (int)vr.uiSwapchain.height;
-
-			panelReport = panelNow;
-
-			// Through gl4es, which sets the driver's read and draw bindings
-			// both; going straight at the driver here would leave gl4es holding
-			// a target it no longer has.
-			VR_BindFramebuffer(vr.uiFramebuffer);
-
-			for (gy = 0; gy < 16; gy++) {
-				for (gx = 0; gx < 16; gx++) {
-					glReadPixels(gx * (bw / 16) + bw / 32, gy * (bh / 16) + bh / 32,
-						1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-
-					if (px[0] > 240 && px[1] < 16 && px[2] > 240) {
-						untouched++;
-					} else if (px[0] <= 8 && px[1] <= 8 && px[2] <= 8) {
-						black++;
-					} else {
-						drawn++;
-					}
-				}
-			}
-
-			Com_Printf("VR panel: %d untouched, %d black, %d drawn (of 256)\n",
-				untouched, black, drawn);
-		}
-	}
 
 
 

@@ -1556,13 +1556,6 @@ extern cvar_t	*r_ext_max_anisotropy;
 extern cvar_t	*r_forceClampToEdge;
 extern cvar_t	*r_geForce3WorkAround;
 extern cvar_t	*r_reset_tc_array;
-extern cvar_t	*r_flatColor;
-extern cvar_t	*r_traceSurf;
-extern cvar_t	*r_forceGenericStage;
-extern cvar_t	*r_noFog;
-extern cvar_t	*r_noCull;
-extern cvar_t	*r_noDepth;
-extern cvar_t	*r_invertCull;
 
 extern	cvar_t	*r_nobind;						// turns off binding to appropriate textures
 extern	cvar_t	*r_singleShader;				// make most world faces use default shader

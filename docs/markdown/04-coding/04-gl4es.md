@@ -162,6 +162,14 @@ number; an `r_flatColor` override that did not apply to multitextured surfaces,
 so it only ever covered models; and a flat-red override that restored its state
 inside a branch that was never taken, corrupting the renderer it was measuring.
 
+**Verify the change landed.** `r_noDepth` was declared, registered, documented
+and tested across several device runs - and never actually used, because the
+edit that was supposed to read it silently failed to apply and nothing checked.
+Every result attributed to it was a no-op, and it sat in the "known good"
+configuration taking credit for what disabling culling was doing. Grep for the
+symbol after editing, or read the warning log; a cvar that reads nothing looks
+exactly like a cvar that changes nothing.
+
 **Look at the frame.** `vr_captureEye` writes the eye buffer to
 `main/vrshotN.tga` every two seconds. One image settled questions that six
 rounds of verbal description could not. Pixel counts bound the answer; a picture
