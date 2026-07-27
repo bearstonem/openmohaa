@@ -23,6 +23,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "client.h"
 #include "cl_ui.h"
+#ifdef USE_OPENXR
+#include "../vr/vr_common.h"
+#endif
 
 unsigned	frame_msec;
 int			old_com_frameTime;
@@ -53,6 +56,14 @@ kbutton_t	in_lookup, in_lookdown, in_moveleft, in_moveright;
 kbutton_t	in_strafe, in_speed;
 
 qboolean	in_guimouse;
+
+#ifdef USE_OPENXR
+cvar_t	*cl_vrSnapAngle;
+cvar_t	*cl_vrSmoothTurn;
+cvar_t	*cl_vrTurnSpeed;
+cvar_t	*cl_vrDeadzone;
+cvar_t	*cl_vrWalkWithView;
+#endif
 
 kbutton_t	in_up, in_down;
 
@@ -723,6 +734,89 @@ void CL_FinishMove( usercmd_t *cmd ) {
 CL_CreateCmd
 =================
 */
+#ifdef USE_OPENXR
+/*
+=================
+CL_VRMove
+
+Turns the headset and its sticks into a usercmd.
+
+Until now head tracking only moved the camera the renderer drew from, which
+left the game itself unaware of it - objectives that ask the player to look at
+something, and anything else that consults the player's view angles, never saw
+it. Setting the view angles here is what makes the game agree with what the
+player can see.
+
+Aim comes from the head for the moment. Section 5 of the porting plan is right
+that a shooter wants it on the controller instead, but that belongs with weapon
+handling; looking at things has to work first.
+=================
+*/
+static void CL_VRMove( usercmd_t *cmd ) {
+	static float	snapYaw;
+	static qboolean	turnCentred = qtrue;
+	vrInput_t		in;
+	float			deadzone, turn;
+
+	if ( !VR_Enabled() || !VR_GetInput( &in ) ) {
+		return;
+	}
+
+	deadzone = cl_vrDeadzone ? cl_vrDeadzone->value : 0.2f;
+
+	// Turning. Snap by default: a stick that rotates the world smoothly while
+	// the inner ear insists otherwise is the classic way to make people ill,
+	// and it costs nothing to offer both.
+	turn = in.turn;
+
+	if ( fabs( turn ) < deadzone ) {
+		turnCentred = qtrue;
+	} else if ( cl_vrSmoothTurn && cl_vrSmoothTurn->integer ) {
+		snapYaw -= turn * ( cl_vrTurnSpeed ? cl_vrTurnSpeed->value : 90.0f ) * (float)cls.frametime * 0.001f;
+	} else if ( turnCentred ) {
+		// One step per flick, not per frame.
+		snapYaw -= ( turn > 0 ? 1.0f : -1.0f ) * ( cl_vrSnapAngle ? cl_vrSnapAngle->value : 45.0f );
+		turnCentred = qfalse;
+	}
+
+	cl.viewangles[YAW] = snapYaw + in.headYaw;
+	cl.viewangles[PITCH] = in.headPitch;
+
+	// Walking follows the off hand rather than the gaze. Tying travel to where
+	// the player is looking means they cannot glance sideways without veering,
+	// which is what makes room scale movement feel like being dragged around;
+	// steering with the free hand lets them look wherever they like and keep
+	// walking in a straight line.
+	{
+		float forward = in.moveForward;
+		float side = in.moveRight;
+		float heading = 0.0f;
+
+		if ( in.handsTracked && !( cl_vrWalkWithView && cl_vrWalkWithView->integer ) ) {
+			heading = in.offhandYaw - in.headYaw;
+		}
+
+		if ( heading != 0.0f ) {
+			float radians = DEG2RAD( heading );
+			float c = cos( radians );
+			float sn = sin( radians );
+			float f = forward;
+
+			forward = f * c - side * sn;
+			side    = f * sn + side * c;
+		}
+
+		if ( fabs( forward ) > deadzone ) {
+			cmd->forwardmove = ClampChar( cmd->forwardmove + (int)( forward * 127.0f ) );
+		}
+
+		if ( fabs( side ) > deadzone ) {
+			cmd->rightmove = ClampChar( cmd->rightmove + (int)( side * 127.0f ) );
+		}
+	}
+}
+#endif
+
 usercmd_t CL_CreateCmd( void ) {
 	usercmd_t	cmd;
 	vec3_t		oldAngles;
@@ -744,6 +838,10 @@ usercmd_t CL_CreateCmd( void ) {
 
 	// get basic movement from joystick
 	CL_JoystickMove( &cmd );
+
+#ifdef USE_OPENXR
+	CL_VRMove( &cmd );
+#endif
 
 	// check to make sure the angles haven't wrapped
 	if ( cl.viewangles[PITCH] - oldAngles[PITCH] > 90 ) {
@@ -1210,6 +1308,15 @@ void CL_InitInput( void ) {
 
 	cl_nodelta = Cvar_Get ("cl_nodelta", "0", 0);
 	cl_debugMove = Cvar_Get ("cl_debugMove", "0", 0);
+
+#ifdef USE_OPENXR
+	// Comfort options, all tunable on the headset rather than at build time.
+	cl_vrSnapAngle = Cvar_Get( "cl_vrSnapAngle", "45", CVAR_ARCHIVE );
+	cl_vrSmoothTurn = Cvar_Get( "cl_vrSmoothTurn", "0", CVAR_ARCHIVE );
+	cl_vrTurnSpeed = Cvar_Get( "cl_vrTurnSpeed", "90", CVAR_ARCHIVE );
+	cl_vrDeadzone = Cvar_Get( "cl_vrDeadzone", "0.2", CVAR_ARCHIVE );
+	cl_vrWalkWithView = Cvar_Get( "cl_vrWalkWithView", "0", CVAR_ARCHIVE );
+#endif
 }
 
 /*

@@ -106,6 +106,29 @@ void VR_GetEyeView(int eye, vrEyeView_t *view);
 // engine's cursor at wherever the player is aiming on the panel.
 void VR_UpdateInput(void);
 
+/*
+What the player is doing, for the client to turn into a usercmd.
+*/
+typedef struct {
+	qboolean	valid;
+
+	float		moveForward;	// -1..1, left stick
+	float		moveRight;
+	float		turn;			// -1..1, right stick
+
+	float		headYaw;		// degrees, relative to where they started
+	float		headPitch;
+
+	// Where each hand points, same reference as the head. The off hand steers
+	// walking so the player can look around without veering.
+	float		offhandYaw;
+	float		weaponYaw;
+	float		weaponPitch;
+	qboolean	handsTracked;
+} vrInput_t;
+
+qboolean VR_GetInput(vrInput_t *input);
+
 #ifdef __cplusplus
 }
 #endif

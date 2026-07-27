@@ -127,6 +127,8 @@ static struct {
 	XrActionSet     actionSet;
 	XrAction        aimAction;
 	XrAction        selectAction;
+	XrAction        moveAction;
+	XrAction        turnAction;
 	XrPath          handPaths[2];
 	XrSpace         aimSpaces[2];
 	qboolean        actionsReady;
@@ -659,6 +661,23 @@ static void VR_CreateActions(void)
 		return;
 	}
 
+	actionInfo.actionType = XR_ACTION_TYPE_VECTOR2F_INPUT;
+	actionInfo.countSubactionPaths = 0;
+	actionInfo.subactionPaths = NULL;
+	Q_strncpyz(actionInfo.actionName, "move", sizeof(actionInfo.actionName));
+	Q_strncpyz(actionInfo.localizedActionName, "Move", sizeof(actionInfo.localizedActionName));
+
+	if (!XR_CHECK(xrCreateAction(vr.actionSet, &actionInfo, &vr.moveAction))) {
+		return;
+	}
+
+	Q_strncpyz(actionInfo.actionName, "turn", sizeof(actionInfo.actionName));
+	Q_strncpyz(actionInfo.localizedActionName, "Turn", sizeof(actionInfo.localizedActionName));
+
+	if (!XR_CHECK(xrCreateAction(vr.actionSet, &actionInfo, &vr.turnAction))) {
+		return;
+	}
+
 	for (i = 0; i < (int)ARRAY_LEN(profiles); i++) {
 		const char *hands[2] = { "left", "right" };
 		uint32_t    count = 0;
@@ -677,6 +696,17 @@ static void VR_CreateActions(void)
 			bindings[count].action = vr.selectAction;
 			if (XR_SUCCEEDED(xrStringToPath(vr.instance, path, &bindings[count].binding))) {
 				count++;
+			}
+
+			// Thumbsticks only exist on the Touch profile; the simple
+			// controller has none, and a binding it does not know would have
+			// the runtime reject the whole set.
+			if (i == 0) {
+				Com_sprintf(path, sizeof(path), "/user/hand/%s/input/thumbstick", hands[hand]);
+				bindings[count].action = (hand == 0) ? vr.moveAction : vr.turnAction;
+				if (XR_SUCCEEDED(xrStringToPath(vr.instance, path, &bindings[count].binding))) {
+					count++;
+				}
 			}
 		}
 
@@ -888,6 +918,120 @@ void VR_UpdateInput(void)
 		Com_QueueEvent(0, SE_KEY, K_MOUSE1, selectDown, 0, NULL);
 		vr.selectWasDown = selectDown;
 	}
+}
+
+/*
+==================
+VR_AimForward
+
+A controller's forward direction, in the same engine frame and with the same
+recentring as the head, so hand and head headings can be compared directly.
+==================
+*/
+static void VR_AimForward(const XrQuaternionf *q, vec3_t forward)
+{
+	XrVector3f  back = { 0.0f, 0.0f, -1.0f };
+	XrVector3f  dir;
+
+	VR_RotateVector(q, &back, &dir);
+
+	forward[0] = -dir.z;
+	forward[1] = -dir.x;
+	forward[2] =  dir.y;
+
+	if (vr.yawOffset != 0.0f) {
+		const float radians = -vr.yawOffset * (float)M_PI / 180.0f;
+		const float c = cosf(radians);
+		const float sn = sinf(radians);
+		const float x = forward[0];
+		const float y = forward[1];
+
+		forward[0] = x * c - y * sn;
+		forward[1] = x * sn + y * c;
+	}
+
+	VectorNormalize(forward);
+}
+
+/*
+==================
+VR_GetInput
+
+The sticks, and where the head is pointing relative to where the player
+started. Heading is measured from the same reference the view uses, so the
+game's idea of which way the player faces matches what they see.
+==================
+*/
+qboolean VR_GetInput(vrInput_t *input)
+{
+	XrActionStateGetInfo  getInfo;
+	XrActionStateVector2f stick;
+	vec3_t                angles;
+
+	memset(input, 0, sizeof(*input));
+
+	if (!vr.actionsReady || !vr.sessionRunning || !vr.viewsValid) {
+		return qfalse;
+	}
+
+	memset(&getInfo, 0, sizeof(getInfo));
+	getInfo.type = XR_TYPE_ACTION_STATE_GET_INFO;
+
+	memset(&stick, 0, sizeof(stick));
+	stick.type = XR_TYPE_ACTION_STATE_VECTOR2F;
+	getInfo.action = vr.moveAction;
+
+	if (XR_SUCCEEDED(xrGetActionStateVector2f(vr.session, &getInfo, &stick)) && stick.isActive) {
+		input->moveRight = stick.currentState.x;
+		input->moveForward = stick.currentState.y;
+	}
+
+	memset(&stick, 0, sizeof(stick));
+	stick.type = XR_TYPE_ACTION_STATE_VECTOR2F;
+	getInfo.action = vr.turnAction;
+
+	if (XR_SUCCEEDED(xrGetActionStateVector2f(vr.session, &getInfo, &stick)) && stick.isActive) {
+		input->turn = stick.currentState.x;
+	}
+
+	// The eye views already carry the recentred orientation, so read the
+	// heading back out of them rather than recomputing it from the raw pose.
+	vectoangles(vr.eyeViews[0].axis[0], angles);
+	input->headYaw = angles[YAW];
+	input->headPitch = angles[PITCH];
+
+	// Both hands, in the same frame as the head so the two can be compared.
+	{
+		XrSpaceLocation location;
+		int             hand;
+
+		for (hand = 0; hand < 2; hand++) {
+			vec3_t forward, handAngles;
+
+			memset(&location, 0, sizeof(location));
+			location.type = XR_TYPE_SPACE_LOCATION;
+
+			if (!XR_SUCCEEDED(xrLocateSpace(vr.aimSpaces[hand], vr.stageSpace,
+					vr.frameState.predictedDisplayTime, &location))
+				|| !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+				continue;
+			}
+
+			VR_AimForward(&location.pose.orientation, forward);
+			vectoangles(forward, handAngles);
+
+			if (hand == 0) {
+				input->offhandYaw = handAngles[YAW];
+			} else {
+				input->weaponYaw = handAngles[YAW];
+				input->weaponPitch = handAngles[PITCH];
+				input->handsTracked = qtrue;
+			}
+		}
+	}
+
+	input->valid = qtrue;
+	return qtrue;
 }
 
 /*
