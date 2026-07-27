@@ -241,18 +241,53 @@ context. **RTCWQuest does exactly this** (`TBXR_Common.c` binds framebuffers,
 clears and blits directly while the engine renders through gl4es), so the
 arrangement is proven; do not redesign it on suspicion.
 
-One consequence has been dealt with. gl4es batches geometry and flushes lazily,
-and only learns to flush when something *it* knows about changes the target. The
-VR layer used to bind each eye directly and tell the renderer afterwards, which
-would have left one pass's leftovers to arrive in the next target. Every
-transition now calls `re.SetDefaultFramebuffer` **first**; the direct bind that
-follows is a no-op against the same target and is still there for renderers
-without the entry point.
+Three things about that boundary were learned the hard way and should not be
+re-derived.
 
-What has *not* been established is whether gl4es's cached state survives the VR
-layer's direct `glDisable(GL_SCISSOR_TEST)` / `glColorMask` / `glViewport`.
-Quake 3's backend re-issues those every frame, and RTCWQuest gets away with it,
-so this is a suspect to remember rather than a bug to fix in advance.
+**gl4es cannot bind a framebuffer it did not create.** `gl4es_glBindFramebuffer`
+looks the name up in gl4es's own table (`find_framebuffer`); for a name from the
+driver's `glGenFramebuffers` - which is every framebuffer the VR layer owns - the
+lookup misses, it raises `GL_INVALID_VALUE`, **returns without binding**, and
+goes on believing framebuffer 0 is current. Routing the eye redirect through
+gl4es therefore does nothing at all, and the symptom is not an error: it is a
+black headset, working audio, and the frame loop reporting a contented 90 fps
+while the whole game draws into the window. The renderer must bind nothing; the
+VR layer's own direct bind is what selects the eye. That is what RTCWQuest does,
+because Quake 3's fixed function renderer has no framebuffer calls in it at all.
+
+**But the renderer still has to be told, for the flush.** gl4es batches geometry
+and issues it lazily, so work built for one target arrives in whichever is bound
+when it finally goes out. `RE_SetDefaultFramebuffer` exists now only to flush -
+it binds nothing - and the VR layer calls it *before* its own bind so the flush
+lands while the old target is still current.
+
+**gl4es answers `glGetString` from constants.** `GL_VERSION`, `GL_VENDOR` and
+`GL_RENDERER` come out of its own globals without the driver being asked, so the
+engine's long-standing proof that a context is live - `GL_VERSION` coming back
+non-NULL - passes unconditionally under gl4es. A context created but never bound
+sails through `R_Init` and is only noticed somewhere else entirely. `GLimp_SetMode`
+now asks SDL directly instead.
+
+Not established: whether gl4es's cached state survives the VR layer's direct
+`glDisable(GL_SCISSOR_TEST)` / `glColorMask` / `glViewport`. Quake 3's backend
+re-issues those every frame and RTCWQuest gets away with it, so this is a suspect
+to remember rather than a bug to fix in advance.
+
+### 5.2.1 The EGL context
+
+SDL binds the GL context against the *window's* EGL surface, and in a headset
+there is no window being presented - so that surface never arrives. What SDL does
+then is the trap: `SDL_EGL_MakeCurrent`, handed no surface and without
+`gl_allow_no_surface`, calls `eglMakeCurrent(EGL_NO_SURFACE, EGL_NO_CONTEXT)` to
+unbind everything **and returns success**. SDL then records the context as
+current, so SDL and EGL disagree permanently, and asking SDL to bind it again
+does nothing because `SDL_GL_MakeCurrent` sees its own bookkeeping agree and
+returns early.
+
+RTCWQuest never meets this because it never depends on a window surface: it makes
+its context current against a 16x16 pbuffer (`TBXR_Common.c`, `egl->TinySurface`).
+`VR_CreateSession` now does the same with the context SDL already made. The
+pbuffer outlives the session on purpose and is released in `VR_Shutdown`.
 
 ### 5.3 Then the things the renderer swap was for
 
