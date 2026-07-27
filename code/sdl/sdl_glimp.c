@@ -35,6 +35,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../sys/sys_local.h"
 #include "sdl_icon.h"
 
+#ifdef USE_GL4ES
+#include <dlfcn.h>
+#endif
+
 typedef enum
 {
 	RSERR_OK,
@@ -252,6 +256,93 @@ static void APIENTRY GLimp_GLES_PolygonMode( GLenum face, GLenum mode ) {
 	// unsupported
 }
 
+#ifdef USE_GL4ES
+/*
+===============
+GLimp_GL4ES_GetProcAddress
+
+The fixed function renderer's entry points have to come from gl4es and from
+nowhere else.
+
+SDL cannot be asked for them. On EGL 1.5 - which the Quest is -
+SDL_EGL_GetProcAddress tries eglGetProcAddress before it tries the library it
+loaded, and the driver answers for every name OpenGL 1.x and ES have in common:
+glEnable, glBindTexture, glDrawArrays, glTexImage2D and eighty more. Only the
+names that exist nowhere but desktop GL - glBegin, glMatrixMode - would reach
+gl4es. That split is worse than either half on its own, because gl4es batches
+geometry and tracks the matrix stack against calls the driver would then never
+be told about.
+
+So resolve against the gl4es handle directly. It is already in the process, in
+DT_NEEDED, so this dlopen only takes a reference to it.
+===============
+*/
+static void *GLimp_GL4ES_GetProcAddress( const char *name ) {
+	static void *gl4es = NULL;
+
+	if ( !gl4es ) {
+		gl4es = dlopen( "libgl4es.so", RTLD_NOW | RTLD_LOCAL );
+
+		if ( !gl4es ) {
+			Com_Error( ERR_FATAL, "Could not open libgl4es.so: %s", dlerror() );
+		}
+
+		// NO_INIT_CONSTRUCTOR is set, so gl4es does not attach itself to the
+		// context behind our back; it is told to, once the context is current.
+		void ( *initialize_gl4es )( void ) = dlsym( gl4es, "initialize_gl4es" );
+
+		if ( !initialize_gl4es ) {
+			Com_Error( ERR_FATAL, "libgl4es.so has no initialize_gl4es" );
+		}
+
+		initialize_gl4es();
+	}
+
+	return dlsym( gl4es, name );
+}
+
+// Extensions have to come from the same place as everything else, for the same
+// reason: the multitexture entry points below are the ones renderergl1 leans on
+// hardest, and gl4es has to see them.
+#define GLimp_GetExtensionProc( name ) GLimp_GL4ES_GetProcAddress( name )
+
+/*
+===============
+GLimp_ExtensionSupported
+
+And the extension *string* has to come from gl4es too. SDL_GL_ExtensionSupported
+resolves glGetString through SDL, so it reads the driver's list - which is the
+ES one, and names none of the desktop extensions the renderer asks after. Left
+to SDL, GL_ARB_multitexture reads as absent and the renderer quietly drops to a
+single texture unit.
+
+qglGetString is gl4es's by this point; GLimp_GetProcAddresses has already run.
+===============
+*/
+static qboolean GLimp_ExtensionSupported( const char *extension ) {
+	const char *extensions = (const char *)qglGetString( GL_EXTENSIONS );
+	const char *p;
+	size_t len = strlen( extension );
+
+	if ( !extensions ) {
+		return qfalse;
+	}
+
+	// Whole tokens only, or GL_EXT_texture_compression_s3tc would answer for a
+	// query about GL_EXT_texture_compression.
+	for ( p = extensions; ( p = strstr( p, extension ) ) != NULL; p += len ) {
+		if ( ( p == extensions || p[-1] == ' ' ) && ( p[len] == ' ' || p[len] == '\0' ) ) {
+			return qtrue;
+		}
+	}
+
+	return qfalse;
+}
+#else
+#define GLimp_GetExtensionProc( name ) SDL_GL_GetProcAddress( name )
+#define GLimp_ExtensionSupported( name ) SDL_GL_ExtensionSupported( name )
+#endif
+
 /*
 ===============
 GLimp_GetProcAddresses
@@ -265,6 +356,12 @@ static qboolean GLimp_GetProcAddresses( qboolean fixedFunction ) {
 
 #ifdef __SDL_NOGETPROCADDR__
 #define GLE( ret, name, ... ) qgl##name = gl#name;
+#elif defined( USE_GL4ES )
+#define GLE( ret, name, ... ) qgl##name = (name##proc *) GLimp_GL4ES_GetProcAddress("gl" #name); \
+	if ( qgl##name == NULL ) { \
+		ri.Printf( PRINT_ALL, "ERROR: Missing OpenGL function %s\n", "gl" #name ); \
+		success = qfalse; \
+	}
 #else
 #define GLE( ret, name, ... ) qgl##name = (name##proc *) SDL_GL_GetProcAddress("gl" #name); \
 	if ( qgl##name == NULL ) { \
@@ -906,8 +1003,8 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 	glConfig.textureCompression = TC_NONE;
 
 	// GL_EXT_texture_compression_s3tc
-	if ( ( QGLES_VERSION_ATLEAST( 2, 0 ) || SDL_GL_ExtensionSupported( "GL_ARB_texture_compression" ) ) &&
-	     SDL_GL_ExtensionSupported( "GL_EXT_texture_compression_s3tc" ) )
+	if ( ( QGLES_VERSION_ATLEAST( 2, 0 ) || GLimp_ExtensionSupported( "GL_ARB_texture_compression" ) ) &&
+	     GLimp_ExtensionSupported( "GL_EXT_texture_compression_s3tc" ) )
 	{
 		if ( r_ext_compressed_textures->value )
 		{
@@ -927,7 +1024,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 	// GL_S3_s3tc ... legacy extension before GL_EXT_texture_compression_s3tc.
 	if (glConfig.textureCompression == TC_NONE)
 	{
-		if ( SDL_GL_ExtensionSupported( "GL_S3_s3tc" ) )
+		if ( GLimp_ExtensionSupported( "GL_S3_s3tc" ) )
 		{
 			if ( r_ext_compressed_textures->value )
 			{
@@ -950,7 +1047,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 	{
 		// GL_EXT_texture_env_add
 		glConfig.textureEnvAddAvailable = qfalse;
-		if ( SDL_GL_ExtensionSupported( "GL_EXT_texture_env_add" ) )
+		if ( GLimp_ExtensionSupported( "GL_EXT_texture_env_add" ) )
 		{
 			if ( r_ext_texture_env_add->integer )
 			{
@@ -972,13 +1069,13 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 		qglMultiTexCoord2fARB = NULL;
 		qglActiveTextureARB = NULL;
 		qglClientActiveTextureARB = NULL;
-		if ( SDL_GL_ExtensionSupported( "GL_ARB_multitexture" ) )
+		if ( GLimp_ExtensionSupported( "GL_ARB_multitexture" ) )
 		{
 			if ( r_ext_multitexture->value )
 			{
-				qglMultiTexCoord2fARB = SDL_GL_GetProcAddress( "glMultiTexCoord2fARB" );
-				qglActiveTextureARB = SDL_GL_GetProcAddress( "glActiveTextureARB" );
-				qglClientActiveTextureARB = SDL_GL_GetProcAddress( "glClientActiveTextureARB" );
+				qglMultiTexCoord2fARB = GLimp_GetExtensionProc( "glMultiTexCoord2fARB" );
+				qglActiveTextureARB = GLimp_GetExtensionProc( "glActiveTextureARB" );
+				qglClientActiveTextureARB = GLimp_GetExtensionProc( "glClientActiveTextureARB" );
 
 				if ( qglActiveTextureARB )
 				{
@@ -1009,13 +1106,13 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 		}
 
 		// GL_EXT_compiled_vertex_array
-		if ( SDL_GL_ExtensionSupported( "GL_EXT_compiled_vertex_array" ) )
+		if ( GLimp_ExtensionSupported( "GL_EXT_compiled_vertex_array" ) )
 		{
 			if ( r_ext_compiled_vertex_array->value )
 			{
 				ri.Printf( PRINT_ALL, "...using GL_EXT_compiled_vertex_array\n" );
-				qglLockArraysEXT = ( void ( APIENTRY * )( GLint, GLint ) ) SDL_GL_GetProcAddress( "glLockArraysEXT" );
-				qglUnlockArraysEXT = ( void ( APIENTRY * )( void ) ) SDL_GL_GetProcAddress( "glUnlockArraysEXT" );
+				qglLockArraysEXT = ( void ( APIENTRY * )( GLint, GLint ) ) GLimp_GetExtensionProc( "glLockArraysEXT" );
+				qglUnlockArraysEXT = ( void ( APIENTRY * )( void ) ) GLimp_GetExtensionProc( "glUnlockArraysEXT" );
 				if (!qglLockArraysEXT || !qglUnlockArraysEXT)
 				{
 					ri.Error (ERR_FATAL, "bad getprocaddress");
@@ -1033,7 +1130,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 	}
 
 	textureFilterAnisotropic = qfalse;
-	if ( SDL_GL_ExtensionSupported( "GL_EXT_texture_filter_anisotropic" ) )
+	if ( GLimp_ExtensionSupported( "GL_EXT_texture_filter_anisotropic" ) )
 	{
 		if ( r_ext_texture_filter_anisotropic->integer ) {
 			qglGetIntegerv( GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, (GLint *)&maxAnisotropy );
@@ -1058,7 +1155,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 	}
 
 	haveClampToEdge = qfalse;
-	if ( QGL_VERSION_ATLEAST( 1, 2 ) || QGLES_VERSION_ATLEAST( 1, 0 ) || SDL_GL_ExtensionSupported( "GL_SGIS_texture_edge_clamp" ) )
+	if ( QGL_VERSION_ATLEAST( 1, 2 ) || QGLES_VERSION_ATLEAST( 1, 0 ) || GLimp_ExtensionSupported( "GL_SGIS_texture_edge_clamp" ) )
 	{
 		ri.Printf( PRINT_ALL, "...using GL_SGIS_texture_edge_clamp\n" );
 		haveClampToEdge = qtrue;

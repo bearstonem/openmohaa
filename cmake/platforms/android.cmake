@@ -12,11 +12,20 @@ if(NOT ANDROID)
     return()
 endif()
 
-# renderergl1 is fixed function and would need a GL-over-GLES translation
-# layer underneath it. renderergl2 already speaks GLES, so it is the only
-# renderer worth building here.
-set(BUILD_RENDERER_GL1 OFF CACHE INTERNAL "")
-set(BUILD_RENDERER_GL2 ON CACHE INTERNAL "")
+# The renderer choice is left to the top level options, which default to
+# renderergl1. That is the fixed function renderer this game's art was authored
+# for, and USE_GL4ES puts the translation layer underneath it that lets it reach
+# OpenGL ES; see cmake/libraries/gl4es.cmake for why it is worth the layer.
+#
+# renderergl2 speaks GLES natively and was the first thing to run here, but it
+# spends tens of milliseconds of CPU per eye binding GLSL programs for lighting
+# this content has no maps to feed. It is still reachable with
+#
+#   -DBUILD_RENDERER_GL1=OFF -DBUILD_RENDERER_GL2=ON -DUSE_GL4ES=OFF
+#
+# Nothing may be forced into the cache here: these are declared with option(),
+# so a `set(... CACHE INTERNAL "")` implies FORCE and would silently overwrite
+# whatever was asked for on the command line.
 
 # Android's linker namespaces are particular about where a dlopen'd library
 # may live. Link the renderer into the client rather than fight them.
@@ -58,7 +67,7 @@ function(android_stage_apk_libraries)
     set(APK_LIBRARIES ${CMAKE_SYSROOT}/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}/libc++_shared.so)
     set(APK_TARGETS)
 
-    foreach(APK_TARGET IN ITEMS ${CLIENT_NAME} SDL2 OpenAL openxr_loader ${CGAME_MODULE} ${GAME_MODULE})
+    foreach(APK_TARGET IN ITEMS ${CLIENT_NAME} SDL2 OpenAL openxr_loader GL ${CGAME_MODULE} ${GAME_MODULE})
         if(TARGET ${APK_TARGET})
             list(APPEND APK_TARGETS ${APK_TARGET})
             list(APPEND APK_LIBRARIES $<TARGET_FILE:${APK_TARGET}>)
