@@ -135,6 +135,30 @@ void GL_BindMultitexture( image_t *image0, GLuint env0, image_t *image1, GLuint 
 ** GL_Cull
 */
 void GL_Cull( int cullType ) {
+	// Backface culling off entirely. If the world's winding is inverted - or
+	// the VR projection flipped handedness - then every single sided surface is
+	// facing away and gets thrown out, while the two sided shaders most models
+	// use survive. That is exactly the split being seen, and this is the one
+	// switch that separates "facing the wrong way" from "not drawn at all".
+	if ( r_noCull->integer ) {
+		cullType = CT_TWO_SIDED;
+	}
+
+	// Swap which face is culled. Q3 culls GL_FRONT for front sided shaders
+	// because its visible polygons are clockwise; if world geometry is reaching
+	// GL counter-clockwise it is culled from the side it should be seen from,
+	// while models - wound the other way, or two sided - survive. Inverting
+	// this proves that outright: the world should appear and the models should
+	// vanish. It is a diagnostic, not a fix; the fix is wherever the winding
+	// is reversed.
+	if ( r_invertCull->integer ) {
+		if ( cullType == CT_FRONT_SIDED ) {
+			cullType = CT_BACK_SIDED;
+		} else if ( cullType == CT_BACK_SIDED ) {
+			cullType = CT_FRONT_SIDED;
+		}
+	}
+
 	if ( glState.faceCulling == cullType ) {
 		return;
 	}
@@ -1193,7 +1217,10 @@ RB_SetupFog
 void RB_SetupFog() {
 	if (!backEnd.viewParms.farplane_distance) {
 		glState.externalSetState &= ~GLS_FOG;
-	} else if (r_farplane_nofog->integer) {
+	} else if (r_farplane_nofog->integer || r_noFog->integer) {
+		// r_noFog rather than r_farplane_nofog because that one is CVAR_CHEAT,
+		// and cheat cvars are reset out from under a config on map load - which
+		// on a device with no console means the setting silently does nothing.
 		glState.externalSetState &= ~GLS_FOG;
 	} else {
 		vec4_t vFogColor;

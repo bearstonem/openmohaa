@@ -641,6 +641,47 @@ void R_SetupFrustum (void) {
 	float	xs, xc;
 	float	ang;
 
+	if ( vrView.active ) {
+		// Cull against the frustum actually being rendered, not the one the
+		// game asked for.
+		//
+		// R_SetupProjection already builds the projection from the runtime's
+		// four tangents, which are both wider than the game's fov and not
+		// centred on the view axis - each eye sees further towards its own side
+		// than towards the nose. The planes below were derived from
+		// viewParms.fovX/fovY instead, which is the game's symmetric cone, so
+		// everything between the two was culled while still being inside the
+		// picture: geometry disappearing towards the outer edge of each eye,
+		// and whole surfaces at once, since culling is per surface. Large flat
+		// ones - terrain patches - go all or nothing.
+		//
+		// renderergl2 does not have this bug, which is why it never showed up
+		// while that was the renderer: its R_SetupFrustum takes xmin/xmax/ymax
+		// from the projection and handles the asymmetric case explicitly.
+		//
+		// Q3's axes are forward, left, up. A boundary ray on the right edge is
+		// forward - tanRight*left, and the inward normal of the plane holding it
+		// is tanRight*forward + left; the other three follow the same way. Not
+		// normalised on purpose - R_CullLocalBox and friends only ever test the
+		// sign of the dot product against dist, and dist is built from the same
+		// unnormalised normal below.
+		VectorScale( tr.viewParms.ori.axis[0], vrView.tanRight, tr.viewParms.frustum[0].normal );
+		VectorMA( tr.viewParms.frustum[0].normal, 1.0f, tr.viewParms.ori.axis[1], tr.viewParms.frustum[0].normal );
+		VectorNormalize( tr.viewParms.frustum[0].normal );
+
+		VectorScale( tr.viewParms.ori.axis[0], -vrView.tanLeft, tr.viewParms.frustum[1].normal );
+		VectorMA( tr.viewParms.frustum[1].normal, -1.0f, tr.viewParms.ori.axis[1], tr.viewParms.frustum[1].normal );
+		VectorNormalize( tr.viewParms.frustum[1].normal );
+
+		VectorScale( tr.viewParms.ori.axis[0], vrView.tanUp, tr.viewParms.frustum[2].normal );
+		VectorMA( tr.viewParms.frustum[2].normal, -1.0f, tr.viewParms.ori.axis[2], tr.viewParms.frustum[2].normal );
+		VectorNormalize( tr.viewParms.frustum[2].normal );
+
+		VectorScale( tr.viewParms.ori.axis[0], -vrView.tanDown, tr.viewParms.frustum[3].normal );
+		VectorMA( tr.viewParms.frustum[3].normal, 1.0f, tr.viewParms.ori.axis[2], tr.viewParms.frustum[3].normal );
+		VectorNormalize( tr.viewParms.frustum[3].normal );
+	} else {
+
 	ang = tr.viewParms.fovX / 180 * M_PI * 0.5f;
 	xs = sin( ang );
 	xc = cos( ang );
@@ -660,6 +701,8 @@ void R_SetupFrustum (void) {
 
 	VectorScale( tr.viewParms.ori.axis[0], xs, tr.viewParms.frustum[3].normal );
 	VectorMA( tr.viewParms.frustum[3].normal, -xc, tr.viewParms.ori.axis[2], tr.viewParms.frustum[3].normal );
+
+	}
 
 	for (i=0 ; i<4 ; i++) {
 		tr.viewParms.frustum[i].type = PLANE_NON_AXIAL;

@@ -32,6 +32,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "../client/client.h"
 #include "../sys/sys_local.h"
+#ifdef USE_OPENXR
+#include "../vr/vr_common.h"
+#endif
 
 #if !SDL_VERSION_ATLEAST(2, 0, 17)
 #define KMOD_SCROLL KMOD_RESERVED
@@ -1185,6 +1188,30 @@ static void IN_ProcessEvents( void )
 							{
 								break;
 							}
+
+#ifdef USE_OPENXR
+							// In a headset the window is not what is being
+							// presented and its size decides nothing. The render
+							// resolution comes from the runtime, through
+							// refimport_t::GetVRRenderResolution, and the
+							// r_custom* cvars set below are ignored - so this
+							// restart achieves nothing at all except destroying
+							// and rebuilding the GL context and the OpenXR
+							// session underneath a running frame loop.
+							//
+							// It is not harmless. glconfig.vidWidth/Height is the
+							// eye buffer, never the Android surface, so the
+							// equality test below can never pass and the restart
+							// fires every time the surface settles - about five
+							// seconds in. After it the engine's 2D stopped
+							// reaching the flat panel entirely: the menu was
+							// drawing perfectly (256/256 panel samples) right up
+							// to CL_Vid_Restart_f and drew nothing ever after.
+							if( VR_Enabled() )
+							{
+								break;
+							}
+#endif
 
 							// check if size actually changed
 							if( cls.glconfig.vidWidth == width && cls.glconfig.vidHeight == height )

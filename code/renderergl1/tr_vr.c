@@ -129,6 +129,41 @@ void R_ApplyVRView(refdef_t *fd)
         return;
     }
 
+    // Refuse a head pose that is not a rotation.
+    //
+    // These axes are written straight into refdef.viewaxis, and R_RotateForViewer
+    // copies them into the modelview without checking anything. A zeroed or
+    // degenerate set therefore produces a modelview whose determinant is zero -
+    // a matrix that collapses three dimensions into a plane - and everything
+    // drawn through it disappears while every individual number upstream of it
+    // still looks correct. Measured directly: world surfaces reporting
+    // "mvdet 0.000" in the same frame as others reporting 1.000.
+    //
+    // The game's own camera is a perfectly good fallback for a frame; a
+    // collapsed one is not.
+    {
+        const float len0 = VectorLength(vrView.axis[0]);
+        const float len1 = VectorLength(vrView.axis[1]);
+        const float len2 = VectorLength(vrView.axis[2]);
+
+        if (len0 < 0.5f || len1 < 0.5f || len2 < 0.5f) {
+            static int lastWarn;
+            int        now = ri.Milliseconds();
+
+            if (now - lastWarn > 1000) {
+                lastWarn = now;
+                ri.Printf(
+                    PRINT_WARNING,
+                    "VR: degenerate head pose (axis lengths %.3f %.3f %.3f); keeping the game's camera\n",
+                    len0,
+                    len1,
+                    len2
+                );
+            }
+            return;
+        }
+    }
+
     // The game's camera decides where the body stands and which way it faces;
     // the headset decides everything about where the eyes are relative to that.
     // Only the heading is taken from the game - its pitch and roll would fight

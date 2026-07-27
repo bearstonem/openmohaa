@@ -91,11 +91,38 @@ the driver:
 
 Only GL_FRAMEBUFFER goes through gl4es. The names are the driver's either way,
 since gl4es registers what the driver hands back.
+
+The same argument covers the viewport, for a different reason. gl4es caches it
+and skips a call that matches what it last sent (raster.c, gl4es_glViewport):
+
+	if (glstate->raster.viewport.x!=x || ... ) { gles_glViewport(...); ... }
+
+So a glViewport issued straight at the driver here does not just go unnoticed -
+it poisons the next one the engine asks for. Set the driver to A behind gl4es's
+back while gl4es still believes A is current, and the engine's own request for A
+is dropped as redundant; set it to B, and the engine draws into A believing it
+asked for B. Routing ours through gl4es keeps the cache honest, and gl4es
+forwards to the same driver call regardless, so nothing else changes.
+
+glScissor is cached the same way but the VR layer never sets one. GL_SCISSOR_TEST
+is safe: gl4es filters GL_CULL_FACE, GL_DEPTH_TEST and GL_BLEND against its own
+state but lets GL_SCISSOR_TEST fall through to the driver every time
+(enable.c, proxy_glEnable's default branch).
 */
 #ifdef USE_GL4ES
 static void (*gl4esGenFramebuffers)(GLsizei n, GLuint *framebuffers);
 static void (*gl4esBindFramebuffer)(GLenum target, GLuint framebuffer);
 static void (*gl4esDeleteFramebuffers)(GLsizei n, const GLuint *framebuffers);
+static void (*gl4esViewport)(GLint x, GLint y, GLsizei width, GLsizei height);
+static void (*gl4esEnable)(GLenum cap);
+static void (*gl4esDisable)(GLenum cap);
+static void (*gl4esDepthMask)(GLboolean flag);
+static void (*gl4esDepthFunc)(GLenum func);
+static void (*gl4esBlendFunc)(GLenum sfactor, GLenum dfactor);
+static void (*gl4esColorMask)(GLboolean r, GLboolean g, GLboolean b, GLboolean a);
+static void (*gl4esCullFace)(GLenum mode);
+static void (*gl4esScissor)(GLint x, GLint y, GLsizei width, GLsizei height);
+static void (*gl4esStencilMask)(GLuint mask);
 
 static qboolean VR_GL4ESFramebuffers(void)
 {
@@ -110,6 +137,16 @@ static qboolean VR_GL4ESFramebuffers(void)
 			gl4esGenFramebuffers    = dlsym(gl4es, "glGenFramebuffers");
 			gl4esBindFramebuffer    = dlsym(gl4es, "glBindFramebuffer");
 			gl4esDeleteFramebuffers = dlsym(gl4es, "glDeleteFramebuffers");
+			gl4esViewport           = dlsym(gl4es, "glViewport");
+			gl4esEnable             = dlsym(gl4es, "glEnable");
+			gl4esDisable            = dlsym(gl4es, "glDisable");
+			gl4esDepthMask          = dlsym(gl4es, "glDepthMask");
+			gl4esDepthFunc          = dlsym(gl4es, "glDepthFunc");
+			gl4esBlendFunc          = dlsym(gl4es, "glBlendFunc");
+			gl4esColorMask          = dlsym(gl4es, "glColorMask");
+			gl4esCullFace           = dlsym(gl4es, "glCullFace");
+			gl4esScissor            = dlsym(gl4es, "glScissor");
+			gl4esStencilMask        = dlsym(gl4es, "glStencilMask");
 		}
 
 		if (!gl4esGenFramebuffers || !gl4esBindFramebuffer || !gl4esDeleteFramebuffers) {
@@ -117,11 +154,157 @@ static qboolean VR_GL4ESFramebuffers(void)
 				"driver will disagree about the target and nothing will be drawn\n");
 			gl4esBindFramebuffer = NULL;
 		}
+
+		if (!gl4esViewport) {
+			Com_Printf("VR: no gl4es glViewport; gl4es will keep a stale viewport "
+				"and drop the renderer's next request for it as redundant\n");
+		}
 	}
 
 	return gl4esBindFramebuffer != NULL;
 }
 #endif
+
+/*
+Every GL state setter below goes through gl4es for the reason given above, and
+the list is not arbitrary - it is exactly what gl4es keeps its own copy of and
+skips when the new value matches:
+
+	glEnable/glDisable   GL_DEPTH_TEST, GL_CULL_FACE, GL_STENCIL_TEST,
+	                     GL_POLYGON_OFFSET_FILL, GL_PROGRAM_POINT_SIZE
+	                     (enable.c, proxy_glEnable)
+	glDepthMask          depth.c, "if (glstate->depth.mask == flag) return"
+	glDepthFunc          depth.c
+	glBlendFunc          blend.c, "already set"
+	glColorMask          gl4es.c
+	glCullFace, glScissor, glViewport
+
+GL_SCISSOR_TEST is not among the cached caps - it falls through proxy_glEnable's
+default branch to the driver every time - but glScissor itself is cached, so the
+pair is routed together rather than split on a distinction nobody will remember.
+
+This is the third time this exact bug has been found here, and the first two
+were each fixed as one-offs: the framebuffer binding (5.7) and the viewport.
+The general statement is that this process has two independent caches over one
+driver - the renderer's glState and gl4es's glstate - and a third party writing
+underneath both. Anything the VR layer sets natively that gl4es also tracks will
+be silently dropped the next time the engine asks for it.
+
+What deliberately stays native is the VR layer's own pipeline: its shader
+program, vertex attributes, uniforms, texture uploads and draw calls. gl4es does
+not need to know about those, and routing them through it would mean handing its
+fixed function emulation a program it did not build.
+*/
+static void VR_Viewport(GLint x, GLint y, GLsizei width, GLsizei height)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers() && gl4esViewport) {
+		gl4esViewport(x, y, width, height);
+		return;
+	}
+#endif
+	glViewport(x, y, width, height);
+}
+
+static void VR_GLEnable(GLenum cap)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers() && gl4esEnable) {
+		gl4esEnable(cap);
+		return;
+	}
+#endif
+	glEnable(cap);
+}
+
+static void VR_GLDisable(GLenum cap)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers() && gl4esDisable) {
+		gl4esDisable(cap);
+		return;
+	}
+#endif
+	glDisable(cap);
+}
+
+static void VR_DepthMask(GLboolean flag)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers() && gl4esDepthMask) {
+		gl4esDepthMask(flag);
+		return;
+	}
+#endif
+	glDepthMask(flag);
+}
+
+static void VR_DepthFunc(GLenum func)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers() && gl4esDepthFunc) {
+		gl4esDepthFunc(func);
+		return;
+	}
+#endif
+	glDepthFunc(func);
+}
+
+static void VR_BlendFunc(GLenum sfactor, GLenum dfactor)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers() && gl4esBlendFunc) {
+		gl4esBlendFunc(sfactor, dfactor);
+		return;
+	}
+#endif
+	glBlendFunc(sfactor, dfactor);
+}
+
+static void VR_ColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers() && gl4esColorMask) {
+		gl4esColorMask(r, g, b, a);
+		return;
+	}
+#endif
+	glColorMask(r, g, b, a);
+}
+
+static void VR_CullFace(GLenum mode)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers() && gl4esCullFace) {
+		gl4esCullFace(mode);
+		return;
+	}
+#endif
+	glCullFace(mode);
+}
+
+static void VR_Scissor(GLint x, GLint y, GLsizei width, GLsizei height)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers() && gl4esScissor) {
+		gl4esScissor(x, y, width, height);
+		return;
+	}
+#endif
+	glScissor(x, y, width, height);
+}
+
+static void VR_StencilMask(GLuint mask)
+{
+#ifdef USE_GL4ES
+	if (VR_GL4ESFramebuffers() && gl4esStencilMask) {
+		gl4esStencilMask(mask);
+		return;
+	}
+#endif
+	glStencilMask(mask);
+}
+
 
 static void VR_GenFramebuffers(GLsizei n, GLuint *framebuffers)
 {
@@ -347,6 +530,8 @@ static struct {
 
 static cvar_t *vr_traceTracking;
 static cvar_t *vr_traceFrame;
+static cvar_t *vr_debugPanel;
+static cvar_t *vr_captureEye;
 
 /*
 ==================
@@ -684,6 +869,16 @@ qboolean VR_Init(void)
 	// enough to otherwise swallow the player's arm.
 	vr.vr_wristDistance = VR_TuningCvar("vr_wristDistance", "0.16");
 	vr.vr_wristBack = VR_TuningCvar("vr_wristBack", "0.07");
+	// On while the menu is still black. Clears the flat panel to magenta before
+	// the engine draws into it and sorts a grid of samples afterwards, so that
+	// "the UI never got here" and "the UI got here and drew black" stop being
+	// the same measurement - which is what the readback that reported 0/256 was
+	// actually doing. Turn it off once the picture is up: it costs a clear and
+	// 256 glReadPixels a second, and a magenta panel is not a shipping menu.
+	vr_debugPanel = VR_TuningCvar("vr_debugPanel", "1");
+	// Dumps the left eye to main/vrshotN.tga every two seconds, so what the
+	// renderer produced can be looked at directly instead of described.
+	vr_captureEye = VR_TuningCvar("vr_captureEye", "1");
 	vr_traceTracking = Cvar_Get("vr_traceTracking", "0", 0);
 	// On by default while the frame budget is still an open question; there is
 	// no console in the headset to turn it on with when it is wanted.
@@ -1225,7 +1420,7 @@ void VR_CreateSession(void)
 	VR_GenFramebuffers(1, &vr.uiFramebuffer);
 	VR_BindFramebuffer(vr.uiFramebuffer);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, vr.uiTexture, 0);
-	glDisable(GL_SCISSOR_TEST);
+	VR_GLDisable(GL_SCISSOR_TEST);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
 
@@ -2533,9 +2728,9 @@ void VR_PrepareEye(int eye)
 	}
 
 	VR_BindFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
-	glViewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
-	glScissor(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
-	glDisable(GL_SCISSOR_TEST);
+	VR_Viewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
+	VR_Scissor(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
+	VR_GLDisable(GL_SCISSOR_TEST);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
@@ -2659,6 +2854,83 @@ void VR_TraceState(int drawMode, int hudPass, int noMenus)
 VR_FinishEye
 ==================
 */
+
+/*
+==================
+VR_CaptureEye
+
+Writes what the engine actually rendered into an eye, as a TGA next to the game
+data, so it can be pulled off the device and looked at.
+
+Everything before this had to be described out loud by whoever was wearing the
+headset, and a description is a lossy channel for a rendering bug - "mangled" and
+"white" each cost a round trip to pin down, and the readback that could not tell
+black from nothing cost several. A picture settles in one look what pixel counts
+only bound.
+
+Deliberately reads the eye framebuffer rather than the swapchain image: this is
+the engine's output before the compositor, before the blit, and before anything
+the VR layer draws over it.
+
+GL hands back rows bottom up and TGA with a zero origin bit wants them bottom up,
+so the rows go straight out; only BGR ordering has to be undone.
+==================
+*/
+static void VR_CaptureEye(int eye)
+{
+	static int    lastShot;
+	static int    shotIndex;
+	const GLsizei w = (GLsizei)vr.eyeWidth;
+	const GLsizei h = (GLsizei)vr.eyeHeight;
+	unsigned char header[18];
+	unsigned char *rgba, *bgr;
+	char           name[64];
+	int            i, now;
+
+	if (!vr_captureEye || !vr_captureEye->integer || eye != 0 || w <= 0 || h <= 0) {
+		return;
+	}
+
+	now = Sys_Milliseconds();
+	if (now - lastShot < 2000) {
+		return;
+	}
+	lastShot = now;
+
+	rgba = malloc((size_t)w * h * 4);
+	bgr  = malloc((size_t)w * h * 3 + sizeof(header));
+	if (!rgba || !bgr) {
+		free(rgba);
+		free(bgr);
+		return;
+	}
+
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+
+	memset(header, 0, sizeof(header));
+	header[2]  = 2;                      // uncompressed true colour
+	header[12] = w & 0xff;
+	header[13] = (w >> 8) & 0xff;
+	header[14] = h & 0xff;
+	header[15] = (h >> 8) & 0xff;
+	header[16] = 24;
+	memcpy(bgr, header, sizeof(header));
+
+	for (i = 0; i < w * h; i++) {
+		bgr[sizeof(header) + i * 3 + 0] = rgba[i * 4 + 2];
+		bgr[sizeof(header) + i * 3 + 1] = rgba[i * 4 + 1];
+		bgr[sizeof(header) + i * 3 + 2] = rgba[i * 4 + 0];
+	}
+
+	Com_sprintf(name, sizeof(name), "vrshot%d.tga", shotIndex % 6);
+	shotIndex++;
+	FS_WriteFile(name, bgr, (int)(sizeof(header) + (size_t)w * h * 3));
+	Com_Printf("VR capture: wrote %s (%dx%d)\n", name, (int)w, (int)h);
+
+	free(rgba);
+	free(bgr);
+}
+
 void VR_FinishEye(int eye)
 {
 	vrSwapchain_t                *swapchain;
@@ -2674,6 +2946,10 @@ void VR_FinishEye(int eye)
 		return;
 	}
 
+	// Before anything the VR layer draws over the top, so this is the engine's
+	// picture and nothing else.
+	VR_CaptureEye(eye);
+
 	// Again before the direct calls below, and for the same reason as in
 	// VR_PrepareEye: this is where the renderer flushes, and it has to do it
 	// while this eye is still the bound target.
@@ -2682,7 +2958,7 @@ void VR_FinishEye(int eye)
 	}
 
 	VR_BindFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
-	glDisable(GL_SCISSOR_TEST);
+	VR_GLDisable(GL_SCISSOR_TEST);
 
 	// Hands and the pointer beam go in on top of the world, but only while the
 	// wrist panel is up. A beam hanging off the hand at all times would be in
@@ -2690,16 +2966,16 @@ void VR_FinishEye(int eye)
 	// them; it is there to point at the panel, so it appears with the panel.
 	if (vr.wristVisible && vr.beamReady && vr.beamVertexCount
 		&& !(vr.vr_pointerBeam && !vr.vr_pointerBeam->integer)) {
-		glViewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
+		VR_Viewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
 		VR_DrawBeam(eye, vr.beamVerts, vr.beamVertexCount);
 	}
 
 	// The compositor reads the alpha channel; the engine leaves it at whatever
 	// the scene wrote, which shows up as a translucent image.
-	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+	VR_ColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
-	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	VR_ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
 	// Diagnostic only, and expensive by design: waiting for the GPU to actually
 	// finish is the only way to tell work from queueing. Everything measured so
@@ -3241,28 +3517,28 @@ static void VR_DrawBeam(int eye, const float *verts, int vertexCount)
 	glEnableVertexAttribArray(0);
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), NULL);
 
-	glEnable(GL_DEPTH_TEST);
-	glDepthMask(GL_FALSE);
-	glDisable(GL_CULL_FACE);
-	glEnable(GL_BLEND);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	VR_GLEnable(GL_DEPTH_TEST);
+	VR_DepthMask(GL_FALSE);
+	VR_GLDisable(GL_CULL_FACE);
+	VR_GLEnable(GL_BLEND);
+	VR_BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 	glDrawArrays(GL_TRIANGLES, 0, vertexCount);
 
 	glBindVertexArray((GLuint)prevVertexArray);
 	glBindBuffer(GL_ARRAY_BUFFER, (GLuint)prevArrayBuffer);
 	glUseProgram((GLuint)prevProgram);
-	glDepthMask(prevDepthMask);
-	glBlendFunc(prevBlendSrc, prevBlendDst);
+	VR_DepthMask(prevDepthMask);
+	VR_BlendFunc(prevBlendSrc, prevBlendDst);
 
 	if (!wasDepthTest) {
-		glDisable(GL_DEPTH_TEST);
+		VR_GLDisable(GL_DEPTH_TEST);
 	}
 	if (!wasBlend) {
-		glDisable(GL_BLEND);
+		VR_GLDisable(GL_BLEND);
 	}
 	if (wasCull) {
-		glEnable(GL_CULL_FACE);
+		VR_GLEnable(GL_CULL_FACE);
 	}
 }
 
@@ -3320,15 +3596,15 @@ static void VR_RenderPointerLayer(void)
 		}
 
 		VR_BindFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
-		glViewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
-		glDisable(GL_SCISSOR_TEST);
+		VR_Viewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
+		VR_GLDisable(GL_SCISSOR_TEST);
 		// Cleared to nothing, so this layer is the beam and nothing else. It
 		// goes over the panel rather than under it: a pointer you cannot see
 		// touch the thing it is pointing at is not much of a pointer, and the
 		// menu is the one place the beam actually has a job.
 		glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-		glDepthMask(GL_TRUE);
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+		VR_DepthMask(GL_TRUE);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
 		VR_DrawBeam(eye, vr.beamVerts, vr.beamVertexCount);
 
@@ -3440,8 +3716,26 @@ void VR_PrepareScreenLayer(void)
 	// something that persists between frames, and this buffer is the only
 	// place that is true.
 	VR_BindFramebuffer(vr.uiFramebuffer);
-	glViewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
+	VR_Viewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
 
+	// Diagnostic, and the reason the menu is still unexplained.
+	//
+	// Because the panel is never cleared, "the UI drew nothing" and "the UI drew
+	// black over what was already there" leave an identical buffer, and the
+	// readback in VR_FinishScreenLayer - which counted samples brighter than 8 -
+	// could not tell them apart. It reported 0/256 and that was written down as
+	// "nothing is written at all". It is not evidence for that. The frame before
+	// the menu is the end of a cinematic, which fades to black, so an untouched
+	// panel is black too.
+	//
+	// Starting from a colour nothing in this game draws makes the two cases
+	// different, both in the log and in the headset: magenta means the UI never
+	// arrived, black means it arrived and painted black.
+	if (vr_debugPanel && vr_debugPanel->integer) {
+		VR_GLDisable(GL_SCISSOR_TEST);
+		glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+	}
 }
 
 /*
@@ -3460,34 +3754,53 @@ void VR_FinishScreenLayer(void)
 		return;
 	}
 
-	// TEMPORARY, and deliberately non-destructive - paints nothing. gl4es is now
-	// known to draw, so the question is whether the engine's own 2D reaches this
-	// buffer. Counts samples that are not black.
-	{
+	// Diagnostic. Reads the panel back on a 16x16 grid and sorts each sample
+	// into the three answers the magenta clear in VR_PrepareScreenLayer makes
+	// distinguishable:
+	//
+	//   untouched - the UI never reached this buffer at all
+	//   black     - it reached it and drew black
+	//   drawn     - it reached it and drew something
+	//
+	// The previous version of this counted only "brighter than 8" against a
+	// buffer that is never cleared, so the first two answers were the same
+	// number and the menu looked like it was drawing nothing when the evidence
+	// did not say that.
+	if (vr_debugPanel && vr_debugPanel->integer) {
 		static int panelReport;
 		int panelNow = Sys_Milliseconds();
 
 		if (panelNow - panelReport > 1000) {
 			unsigned char px[4];
-			int gx, gy, lit = 0;
+			int gx, gy;
+			int untouched = 0, black = 0, drawn = 0;
 			const int bw = (int)vr.uiSwapchain.width;
 			const int bh = (int)vr.uiSwapchain.height;
 
 			panelReport = panelNow;
-			glBindFramebuffer(GL_FRAMEBUFFER, vr.uiFramebuffer);
+
+			// Through gl4es, which sets the driver's read and draw bindings
+			// both; going straight at the driver here would leave gl4es holding
+			// a target it no longer has.
+			VR_BindFramebuffer(vr.uiFramebuffer);
 
 			for (gy = 0; gy < 16; gy++) {
 				for (gx = 0; gx < 16; gx++) {
 					glReadPixels(gx * (bw / 16) + bw / 32, gy * (bh / 16) + bh / 32,
 						1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
 
-					if (px[0] > 8 || px[1] > 8 || px[2] > 8) {
-						lit++;
+					if (px[0] > 240 && px[1] < 16 && px[2] > 240) {
+						untouched++;
+					} else if (px[0] <= 8 && px[1] <= 8 && px[2] <= 8) {
+						black++;
+					} else {
+						drawn++;
 					}
 				}
 			}
 
-			Com_Printf("VR panel: %d/256 samples lit\n", lit);
+			Com_Printf("VR panel: %d untouched, %d black, %d drawn (of 256)\n",
+				untouched, black, drawn);
 		}
 	}
 
@@ -3512,7 +3825,7 @@ void VR_FinishScreenLayer(void)
 		return;
 	}
 
-	glDisable(GL_SCISSOR_TEST);
+	VR_GLDisable(GL_SCISSOR_TEST);
 
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, vr.uiFramebuffer);
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, swapchain->frameBuffers[swapchain->acquiredIndex]);
@@ -3522,10 +3835,10 @@ void VR_FinishScreenLayer(void)
 
 	// The compositor reads alpha; the engine leaves whatever the scene wrote.
 	VR_BindFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
-	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+	VR_ColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
-	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	VR_ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
 	VR_BindFramebuffer(0);
 
@@ -3567,11 +3880,11 @@ static void VR_ResolveWristPanel(GLuint target)
 	wasCull = glIsEnabled(GL_CULL_FACE);
 
 	VR_BindFramebuffer(target);
-	glViewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
+	VR_Viewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
 
-	glDisable(GL_DEPTH_TEST);
-	glDisable(GL_BLEND);
-	glDisable(GL_CULL_FACE);
+	VR_GLDisable(GL_DEPTH_TEST);
+	VR_GLDisable(GL_BLEND);
+	VR_GLDisable(GL_CULL_FACE);
 
 	glUseProgram(vr.panelProgram);
 	glBindTexture(GL_TEXTURE_2D, vr.uiTexture);
@@ -3598,13 +3911,13 @@ static void VR_ResolveWristPanel(GLuint target)
 	glUseProgram((GLuint)prevProgram);
 
 	if (wasDepthTest) {
-		glEnable(GL_DEPTH_TEST);
+		VR_GLEnable(GL_DEPTH_TEST);
 	}
 	if (wasBlend) {
-		glEnable(GL_BLEND);
+		VR_GLEnable(GL_BLEND);
 	}
 	if (wasCull) {
-		glEnable(GL_CULL_FACE);
+		VR_GLEnable(GL_CULL_FACE);
 	}
 }
 
@@ -3635,8 +3948,8 @@ void VR_PrepareWristPanel(void)
 	}
 
 	VR_BindFramebuffer(vr.uiFramebuffer);
-	glViewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
-	glDisable(GL_SCISSOR_TEST);
+	VR_Viewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
+	VR_GLDisable(GL_SCISSOR_TEST);
 
 	// Cleared to nothing at all, not to black. The panel is a strip of readouts
 	// worn on the arm, not a screen: what the HUD does not draw on should be the
@@ -3687,7 +4000,7 @@ void VR_FinishWristPanel(void)
 		return;
 	}
 
-	glDisable(GL_SCISSOR_TEST);
+	VR_GLDisable(GL_SCISSOR_TEST);
 
 	// Through the resolve rather than a straight blit, because the alpha has to
 	// be worked out on the way across - see panelFragmentShader. A blit would

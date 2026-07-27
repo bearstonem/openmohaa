@@ -378,7 +378,21 @@ RB_SurfaceFace
 void RB_SurfaceFace( srfSurfaceFace_t *surf ) {
 	int			i;
 	qboolean	needsNormal;
-	unsigned	*indices, *tessIndexes;
+	unsigned	*indices;
+	// glIndex_t, not unsigned. These two are different types the moment
+	// GL_INDEX_TYPE is GL_UNSIGNED_SHORT, which it is under gl4es, and writing
+	// tess.indexes through an unsigned* puts every index four bytes apart in a
+	// two byte array. The engine's own indices come out interleaved with the
+	// high halves of the previous ones, so each triangle picks up whichever
+	// vertex that lands on - which is what dragged the world's geometry, and
+	// its textures with it, into long streaks while models rendered perfectly.
+	// Models never come through here.
+	//
+	// The compiler said so all along:
+	//   incompatible pointer types assigning to 'unsigned int *' from
+	//   'glIndex_t *' (aka 'unsigned short *') [-Wincompatible-pointer-types]
+	// under sixty four other warnings in this file alone.
+	glIndex_t	*tessIndexes;
 	float		*v;
 	float		*normal;
 	int			ndx;

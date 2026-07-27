@@ -9,21 +9,25 @@ Branch `vr-quest3`.
 
 ## 0. Status at a glance
 
-**Working, on the device:** renderergl1 builds and runs on the Quest 3 on gl4es.
-OpenXR session up, 90 fps against a 90 Hz display, both eyes and the flat panel
-composited, cutscenes render, controllers and pointer beam render, and **the
-engine's own geometry renders** — confirmed by a flat-red override showing the
-intro logo screen in red.
+**Working, on the device:** renderergl1 on gl4es, OpenXR session, both eyes and
+the flat panel composited, **the menus**, cutscenes, controllers and pointer
+beam, static models and entities fully textured, and **90 fps at 4 ms per eye** -
+the number this whole swap was for, against rend2's 50-60 ms.
 
-**The one open problem:** the **main menu draws nothing**. Same frame path, same
-framebuffer, same renderer. The logo screen before the cutscene renders; the
-menu after it does not.
+**The open problem:** **BSP world geometry and terrain do not draw.** Models
+render perfectly; the sky shows through everything else. See section 9 - and read
+9.2 first, because the bisect that section describes is not trustworthy and says
+so.
+
+**Two things fixed since the last handoff**, both real, both in section 8: a
+window-resize `vid_restart` that tore down the GL context and XR session five
+seconds into every run (that was the black menu), and `RB_SurfaceFace` writing
+32-bit indices through a 16-bit array (that was the mangled, stretched world).
 
 **Do not trust anything in section 7 that is not marked as measured.** A long
-sequence of engine-side experiments in this session were run against a gl4es
-that could not draw a single triangle, and every negative result from them is
-worthless. See section 6 — that trap is the single most important thing in this
-document.
+sequence of engine-side experiments in an earlier session were run against a
+gl4es that could not draw a single triangle. See section 6 - that trap, and the
+probe-blindness one in 9.3, are the two most important things in this document.
 
 ---
 
@@ -343,8 +347,11 @@ Measured on the device, after 5.8. Do not re-investigate these.
   and composited — a clear to blue showed as blue in the headset.
 - gl4es reaches that framebuffer: a clear to red showed as red.
 - gl4es renders geometry: a flat quad rendered, verified by pixel readback.
-- **The engine's own geometry renders** — with a flat-red override, the intro
-  logo screen before the cutscene appeared red in the headset.
+- ~~**The engine's own geometry renders** — with a flat-red override, the intro
+  logo screen before the cutscene appeared red in the headset.~~ **Weaker than
+  it reads.** The override had disabled the colour array, and the route it went
+  down was `qglArrayElement`, not `glDrawElements`. It proves one array reaches
+  gl4es on one route, not that the renderer's geometry path works. See 8.1.
 - Cutscenes render (immediate mode, `RE_StretchRaw`).
 - Controllers and the pointer beam render (VR layer's own GLES).
 - Both layers agree on the framebuffer: `gl4es says 10, driver says 10`.
@@ -357,89 +364,136 @@ Measured on the device, after 5.8. Do not re-investigate these.
 
 ---
 
-## 8. The open problem
+## 8. Fixed this session
 
-**The logo screen renders. The menu does not.** Both are flat 2D on the quad
-layer, `clc.state != CA_ACTIVE`, same framebuffer, same renderer, same frame
-path (`VR_UseScreenLayer()` → `VR_PrepareScreenLayer` → `UpdateStereoSide` →
-`re.EndFrame` → `VR_FinishScreenLayer`).
+**8.1 The menu was a renderer restart.** `sdl_input.c`'s `SDL_WINDOWEVENT_RESIZED`
+handler compares the window against `cls.glconfig.vidWidth/Height`, which in VR
+is the *eye buffer*, never the Android surface. It can never match, so it set
+`r_customwidth`/`r_customheight`/`r_mode -1` and scheduled a `vid_restart` about
+five seconds in - cvars the renderer then ignores, because the VR resolution
+comes from `GetVRRenderResolution`. The restart destroyed and rebuilt the GL
+context and the OpenXR session under a running frame loop, and section 5.7's
+framebuffer agreement did not survive it. Measured: the menu drew a full
+`256/256` panel samples right up to `CL_Vid_Restart_f` and nothing ever after.
+Window-resize restarts are now declined under `VR_Enabled()`.
 
-A non-destructive 16×16 grid readback of the panel during the menu reports
-`0/256 samples lit` — nothing is written at all, not even black-on-black.
+`VR_PORT_STATUS.md` called this restart "harmless ... but wasteful". It was the
+entire bug.
 
-### Ruled out this session
+**8.2 `RB_SurfaceFace` wrote 32-bit indices into a 16-bit array.** It declared
+`unsigned *tessIndexes` and assigned `tess.indexes` to it - which is
+`glIndex_t *`, i.e. `unsigned short *` under gl4es (9.1). Every index went in
+four bytes apart in a two-byte array, so half the slots held the zero high
+halves of their neighbours and every triangle picked up whatever vertex that
+landed on. That was the stretched, smeared world that dragged its textures with
+it. Models never come through this function, which is why they were perfect
+throughout.
 
-- **The scissor.** `RE_Scissor` enables `GL_SCISSOR_TEST` and nothing ever
-  disables it, which looked like an excellent candidate for clipping the whole
-  UI away. Disabling it entirely changed nothing. (The test build for this is
-  still in the tree — see 9.)
+`ProjectDlightTexture`'s `unsigned hitIndexes[SHADER_MAX_INDEXES]`, passed
+straight to `R_DrawElements`, had the same fault. Both fixed; a full rebuild now
+reports no index-type mismatches in the renderer.
 
-### Where to look next
-
-The menu is the only thing that draws **per widget**, each setting its own
-viewport and ortho through `re.Set2DWindow` from `cl_ui.cpp:1722` and
-`uiwidget.cpp`. A logged example:
+**The compiler had been saying so all along**, under sixty-odd other warnings:
 
 ```
-viewport 756 -71 403 1126   ortho 0 403 1126 0
+tr_surface.c:401: warning: incompatible pointer types assigning to 'unsigned int *'
+                  from 'glIndex_t *' (aka 'unsigned short *')
 ```
 
-Note `y = -71` and a height of 1126 in a 1056-tall buffer. Those come from
-`uid.vidWidth`/`uid.vidHeight`, which is the UI's idea of the screen. **Check
-what those are set to against the 1008×1056 eye buffer** — if the UI is laying
-out for a different surface size, widget rectangles can land wholly outside the
-panel. That is the most promising untested lead.
+This is the cost of 9.1 that nobody checked for: changing `glIndex_t` is not
+local to the draw call, and the only thing that finds the other users is the
+warning log. **Read it after touching that typedef.**
 
-Also worth doing, cheaply:
+**8.3 The frame budget, which is what the swap was for.** In-game, on the
+device: **90 fps at 4 ms per eye**, against rend2's 50-60 ms (section 2). That
+question is answered and `vr_resolutionScale` can go back to 1.
 
-- Put the flat-red override back and walk from the logo screen into the menu,
-  watching where red stops appearing. The transition is the useful signal, and
-  the logo screen proves the machinery works either side of it.
-- Log every distinct viewport/ortho the menu sets over one second (deduplicated,
-  not sampled once a second — sampling has already misled here twice).
-- Check whether `Draw_StretchPic` (used by the logo) and `Draw_TilePic` /
-  `Draw_TilePicOffset` (used by widgets) differ in a way that matters; note the
-  latter divide by `uploadWidth`/`uploadHeight` for texcoords, which is
-  meaningless if the image failed to upload.
+**8.4 Smaller, all real.** renderergl1's `R_SetupFrustum` culled against the
+game's symmetric fov rather than the runtime's asymmetric per-eye frustum
+(renderergl2 does not have this bug - its `R_SetupFrustum` takes the projection
+edges). Every `glViewport`, `glEnable/glDisable`, `glDepthMask`, `glDepthFunc`,
+`glBlendFunc`, `glColorMask`, `glCullFace` and `glScissor` in the VR layer now
+goes through gl4es, because gl4es caches all of them and silently drops the
+engine's next request for a value its stale copy already claims. `GfxInfo_f`
+printed a different draw route than `R_DrawElements` actually took.
 
 ---
 
-## 9. Diagnostic scaffolding currently in the working tree
+## 9. Still open: world geometry does not draw
 
-**None of this is committed. It must be removed or decided before shipping.**
+Models render perfectly. BSP world surfaces and terrain do not, and the frame
+shows the sky through them.
 
-| File | What | Verdict |
-|---|---|---|
-| `renderergl1/tr_shade.c` | flat-red override in `R_DrawElements` (kills texture, blend, colour array) | **remove** — diagnostic only |
-| `renderergl1/tr_draw.c` | `RE_Scissor` disabled + logging | **remove** — scissor was ruled out, restore the real function |
-| `code/vr/vr_openxr.c` | panel grid-scan readback in `VR_FinishScreenLayer` | **remove** — diagnostic only |
+### 9.1 What has been measured, not argued
 
-Three uncommitted changes are **not** scaffolding and need a decision:
+Each of these was tested directly and none of them is the cause:
 
-**9.1 `renderergl1/tr_local.h` — 16-bit indices.** `GL_INDEX_TYPE` changed to
-`GL_UNSIGNED_SHORT` under `USE_GL4ES`. Justified independently: ES 2.0 has no
-32-bit element indices without `GL_OES_element_index_uint`, and RTCWQuest does
-exactly this under `HAVE_GLES`. Costs nothing — indices only address within one
-tess batch and `SHADER_MAX_VERTEXES` is 2048 (theirs is 6000 with shorts).
-**Keep**, but note it was adopted on invalid evidence and has never been shown to
-be necessary.
+| Ruled out | How |
+|---|---|
+| Vertex data, index range, bounds | traced per surface; all correct, world-space boxes sane, no NaNs |
+| Modelview and projection | **read back from GL** and compared to the engine's: identical, determinant 1 |
+| Clip space position | NDC box computed over every vertex: on screen, `far 0 behind 0` |
+| Visibility / submission | 165 world draws per sample, ground shaders among them |
+| Draw route | `r_primitives 1` (glArrayElement) and 2 (glDrawElements) both |
+| Stage iterator | `r_forceGenericStage 1` |
+| Multitexture | `r_ext_multitexture 0` |
+| Lightmap | `r_vertexLight 1` |
+| Fog | `r_noFog 1` |
+| Stencil shadows | `cg_shadows` was already 0 |
+| Terrain pool | `1275 tris / 682 verts` of 24576; no "insufficient tris" |
+| VR camera | `org -5953 -48 -238`, inside the ground surface's own box, ~60-100 units above it |
+| Cull state | GL and engine agree: `GL_FRONT`, `GL_CCW`, `CT_FRONT_SIDED` |
 
-**9.2 `code/sdl/sdl_glimp.c` — compiled vertex arrays disabled under gl4es.**
-Adopted on invalid evidence (section 6). `qglLockArraysEXT` is currently never
-resolved, which also forces `r_primitives` to route 1 (`qglArrayElement`) instead
-of route 2 (`glDrawElements`). **Re-test both ways now that gl4es works.** The
-reference leaves CVA enabled.
+### 9.2 The contradiction, which is the real finding
 
-**9.3 `code/sdl/sdl_glimp.c` — `qglDrawBuffer`/`qglPolygonMode` stubbed under
-gl4es.** Independently defensible (the engine already stubs both on its ES path,
-and `GL_BACK` is not something an FBO has), but adopted on invalid evidence and
-never shown to be necessary. **Keep, low risk**, but do not credit it with
-anything.
+`r_noCull 1` (culling off entirely) made the world render. `r_invertCull 1`
+(swap which face is culled) did **not**. Those cannot both be true of a winding
+problem - degenerate triangles produce no pixels either way, and a reversed
+winding would be fixed by inverting the cull face.
 
-Also uncommitted: the `VR_BindFramebuffer` / `VR_GenFramebuffers` helpers in
-`vr_openxr.c` implementing 5.7. **These are real and should be committed.**
+Worse, **the same configuration has produced different results on different
+runs.** Terrain came back when `developer 1`/`ter_count 1` were restored, and
+those are provably print-only: `g_nSplit`/`g_nMerge` are incremented and printed
+and never read for any decision.
 
----
+**So the single-run bisect in this session is not trustworthy, and neither are
+the conclusions drawn from it.** Anything below "9.1" that reads like a cause is
+not one.
+
+### 9.3 What to do next
+
+**Repeat every result before believing it.** Two runs minimum, same config. The
+non-determinism is the first thing to characterise - if it correlates with where
+the player stands, terrain LOD carries state across frames and adapts to view
+movement, which is the obvious suspect and is MOHAA-specific (RTCW has no
+terrain, so the reference cannot help).
+
+**Then capture a frame from outside the engine.** Every measurement so far has
+been the engine describing itself, and the engine believes it is doing
+everything right. RenderDoc on Quest, or Adreno GPU Inspector, would show what
+the driver actually received. That is the tool this problem has needed for
+several rounds.
+
+**Do not trust a probe that has not been shown to reach the surfaces in
+question.** Three separate probes in this session had blind spots exactly there:
+the panel readback could not tell black from unwritten; `r_flatColor` did not
+apply to multitextured surfaces, so it covered models only and every "the world
+is not drawing" reading from it was about the wrong geometry; and the flat-red
+override restored its state on a branch that was never taken, corrupting the
+renderer it was measuring.
+
+### 9.4 Diagnostics left in the tree
+
+All `CVAR_TEMP`, all default off, all settable from `main/autoexec.cfg`:
+`r_flatColor` (flat per-surface colour, world in red), `r_traceSurf` (per-surface
+data, NDC extent, GL matrices, cull state), `r_forceGenericStage`, `r_noCull`,
+`r_noDepth`, `r_noFog`, `r_invertCull`. `vr_debugPanel` clears the flat panel to
+magenta and classifies samples. `vr_captureEye` writes the left eye to
+`main/vrshot0-5.tga` every two seconds - **this one is worth keeping.** Six
+rounds went into resolving verbal descriptions that one image settled.
+
+`R_ApplyVRView` also now refuses a head pose whose axes are not unit length. It
+has never been observed to fire; it is a guard, not a fix.
 
 ## 10. Working notes
 

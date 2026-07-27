@@ -37,6 +37,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #ifdef USE_GL4ES
 #include <dlfcn.h>
+#include <EGL/egl.h>
 #endif
 
 typedef enum
@@ -394,6 +395,84 @@ GLimp_GetProcAddresses
 Get addresses for OpenGL functions.
 ===============
 */
+
+#ifdef USE_GL4ES
+/*
+===============
+GLimp_BindContextToPbuffer
+
+Give the GL context something to be current against, before anything asks it a
+question.
+
+SDL binds the context to the window's EGL surface, and in a headset no such
+surface ever arrives - so SDL_EGL_MakeCurrent unbinds everything and returns
+success, leaving SDL certain a context is current while EGL reports none.
+
+That was already known; what was missed is how early it matters. gl4es
+initialises on the first proc address request, which is the next thing that
+happens after the context is created. With nothing current, its hardware
+detection and its shader pipeline are set up against no GL at all. The result
+is not a failure anyone sees: clears go straight through to the driver and work
+perfectly, while every piece of geometry gl4es is asked to draw disappears in
+silence, no error raised.
+
+A 16x16 pbuffer is enough to be current against, which is what RTCWQuest uses
+(TBXR_Common.c, egl->TinySurface). The VR layer does the same thing later for
+the OpenXR session; this is the same fix moved to where it has to happen first.
+===============
+*/
+static void GLimp_BindContextToPbuffer( void )
+{
+	static const EGLint pbufferAttribs[] = { EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE };
+	EGLDisplay display;
+	EGLContext context;
+	EGLConfig  config = NULL;
+	EGLint     configId = 0, numConfigs = 0;
+	EGLint     configAttribs[3] = { EGL_CONFIG_ID, 0, EGL_NONE };
+	EGLSurface pbuffer;
+
+	if ( eglGetCurrentContext() != EGL_NO_CONTEXT ) {
+		return;
+	}
+
+	display = eglGetDisplay( EGL_DEFAULT_DISPLAY );
+	context = (EGLContext)SDL_glContext;
+
+	if ( display == EGL_NO_DISPLAY || !context ) {
+		ri.Printf( PRINT_ALL, "gl4es: no EGL context to bind; geometry will not draw\n" );
+		return;
+	}
+
+	eglQueryContext( display, context, EGL_CONFIG_ID, &configId );
+	configAttribs[1] = configId;
+
+	if ( !eglChooseConfig( display, configAttribs, &config, 1, &numConfigs ) || numConfigs < 1 ) {
+		ri.Printf( PRINT_ALL, "gl4es: could not recover EGLConfig %d\n", configId );
+		return;
+	}
+
+	pbuffer = eglCreatePbufferSurface( display, config, pbufferAttribs );
+
+	if ( pbuffer == EGL_NO_SURFACE ) {
+		ri.Printf( PRINT_ALL, "gl4es: could not create the pbuffer (0x%x)\n", eglGetError() );
+		return;
+	}
+
+	if ( !eglMakeCurrent( display, pbuffer, pbuffer, context ) ) {
+		ri.Printf( PRINT_ALL, "gl4es: eglMakeCurrent on the pbuffer failed (0x%x)\n", eglGetError() );
+		return;
+	}
+
+	ri.Printf( PRINT_ALL, "gl4es: context bound to a 16x16 pbuffer before init\n" );
+}
+#endif
+
+#ifdef USE_GL4ES
+static const qboolean usingGL4ES = qtrue;
+#else
+static const qboolean usingGL4ES = qfalse;
+#endif
+
 static qboolean GLimp_GetProcAddresses( qboolean fixedFunction ) {
 	qboolean success = qtrue;
 	const char *version;
@@ -461,6 +540,22 @@ static qboolean GLimp_GetProcAddresses( qboolean fixedFunction ) {
 		if ( QGL_VERSION_ATLEAST( 1, 3 ) ) {
 			QGL_1_3_PROCS;
 		}
+
+#ifdef USE_GL4ES
+		// gl4es reports a desktop version, so this takes the desktop branch
+		// above and picks up the real glDrawBuffer and glPolygonMode. Neither
+		// means anything underneath, where the context is OpenGL ES - which is
+		// why the ES branch below stubs exactly these two out.
+		//
+		// glDrawBuffer is the one that matters. The back end names GL_BACK once
+		// a frame in RB_DrawBuffer, and GL_BACK is not a buffer a framebuffer
+		// object has; asking for it while an eye or the panel is bound leaves
+		// the draw buffer in a state where everything afterwards is discarded.
+		// Correct geometry, correct matrices, no error on the draw itself, and
+		// nothing written anywhere - which is precisely what was happening.
+		qglDrawBuffer = GLimp_GLES_DrawBuffer;
+		qglPolygonMode = GLimp_GLES_PolygonMode;
+#endif
 	} else {
 		if ( QGL_VERSION_ATLEAST( 2, 0 ) ) {
 			QGL_1_1_PROCS;
@@ -919,6 +1014,12 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 			}
 #endif
 
+#ifdef USE_GL4ES
+			// Before GLimp_GetProcAddresses, because that is what initialises
+			// gl4es and gl4es needs a context to look at.
+			GLimp_BindContextToPbuffer();
+#endif
+
 			if ( !GLimp_GetProcAddresses( fixedFunction ) )
 			{
 				ri.Printf( PRINT_ALL, "GLimp_GetProcAddresses() for %s context failed\n", contextName );
@@ -1197,7 +1298,22 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 		}
 
 		// GL_EXT_compiled_vertex_array
-		if ( GLimp_ExtensionSupported( "GL_EXT_compiled_vertex_array" ) )
+		//
+		// Declined on gl4es. This was first adopted on evidence that turned out
+		// to be worthless - it was measured against a gl4es that could not draw
+		// a triangle at all - so it is kept on its own merits, not on that.
+		//
+		// The merits are thin but real: the extension is a 1997 hint about
+		// re-transforming shared vertices between draws, gl4es's glLockArrays
+		// only records first and count and sets a flag, and it re-uploads the
+		// arrays per batch regardless. There is nothing here to win.
+		//
+		// This no longer decides which route R_DrawElements takes. It used to,
+		// by accident: a NULL qglLockArraysEXT sent every surface down the
+		// glBegin/glArrayElement path, which is not a path the reference has
+		// ever run. That renderer now asks for glDrawElements under gl4es
+		// outright, the way RTCWQuest does under HAVE_GLES.
+		if ( !usingGL4ES && GLimp_ExtensionSupported( "GL_EXT_compiled_vertex_array" ) )
 		{
 			if ( r_ext_compiled_vertex_array->value )
 			{

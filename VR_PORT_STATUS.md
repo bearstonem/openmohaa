@@ -138,6 +138,18 @@ stacks on the character's eye height, and the play space's arbitrary forward is
 added to the character's heading — which is why the player spawned facing
 backwards.
 
+**The movement stick is rotated into the view's frame, not the hand's.**
+`forwardmove` and `rightmove` are resolved against the view angles — `PM_AirMove`
+builds `wishvel` from `pml.flat_forward` and `pml.flat_left` — so steering with
+the off hand means rotating the stick *back* by however far the hand leads the
+head. The opposite sign does not offset the steering, it mirrors it: point the
+hand left and the player walks right, and only dead ahead behaves. Team Beef's
+`rotateAboutOrigin` negates the angle it is handed for the same reason. The
+deadzone is taken radially on the raw stick, before that rotation, for a related
+reason: once the two axes are mixed, testing them separately cuts a dead cross
+out of the middle of the stick's travel, so a gentle push at forty five degrees
+does nothing at all.
+
 **Head pose is applied in `RE_RenderScene`**, so it follows every camera the
 game has — the player's, cutscenes, ladders, death animations — without each
 needing to know about VR. That directly serves plan §5's camera audit.
@@ -160,6 +172,10 @@ of it.
 ---
 
 ## 4. Known problems
+
+**Off-hand steering has not been tried on the headset since the sign was
+corrected.** It was mirrored — see section 3 — and the fix is so far only known
+to compile.
 
 **Aim is on the head, not the controller.** Plan §5 is right that this is wrong
 for a shooter. `vrInput_t` already carries `weaponYaw`/`weaponPitch` from the
@@ -203,21 +219,58 @@ full-resolution eye passes at 1680×1760.
    stabilised two-handed mode worth having later.
 2. **Measure the frame budget** on a real map. Everything about how ambitious
    phase 4 can be depends on this number.
-3. **The HUD.** Still screen-space during gameplay, so it has the same
+3. **Ask the runtime for 90 Hz.** Quest 3 hands out 72 by default and nothing
+   here asks for better, so this is probably the largest comfort win still on
+   the table for the least work — `XR_FB_display_refresh_rate`, one extension
+   and two entry points. Do it after 2, since it halves the frame budget.
+4. **The HUD.** Still screen-space during gameplay, so it has the same
    non-convergence the menus had before the quad layer. §3.5 and §5 suggest
    wrist- or weapon-mounted readouts.
-4. Remaining foliage paths, the redundant renderer restart, the Adreno fault.
+5. Remaining foliage paths, the redundant renderer restart, the Adreno fault.
 
 ### Reference
 
-Team Beef's RTCWQuest is cloned at `/home/berkybear/RTCWQuest`. Same Quake 3
-engine lineage, same genre, same headset — the closest possible analogue.
-`Projects/Android/jni/RTCWVR/`: `TBXR_Common.c` is their reusable OpenXR layer,
-`VrInputDefault.c` the movement and weapon handling, `VrInputWeaponAlign.c` the
-per-weapon aim calibration.
+Team Beef's RTCWQuest is cloned at `/home/berkybear/RTCWQuest`, clean at
+`4c714b9`. Same Quake 3 engine lineage, same genre, same headset — the closest
+possible analogue. `Projects/Android/jni/RTCWVR/`: `TBXR_Common.c` is their
+reusable OpenXR layer, `VrInputDefault.c` the movement and weapon handling,
+`VrInputWeaponAlign.c` the per-weapon aim calibration.
 
-The single most valuable thing taken from it so far: **locomotion follows the
-off-hand controller, not the gaze** (`controllerYawHeading = offhandYaw −
-hmdYaw`). Tying travel to where the player looks means they cannot glance
-sideways without veering, which is most of why naive VR movement feels like
-being dragged around.
+The most valuable idea taken from it so far: **locomotion follows the off-hand
+controller, not the gaze** (`controllerYawHeading = offhandYaw − hmdYaw`). Tying
+travel to where the player looks means they cannot glance sideways without
+veering, which is most of why naive VR movement feels like being dragged around.
+
+Worth knowing that this is not what RTCWQuest actually ships. At their HEAD
+`controllerYawHeading` is computed in `VrInputDefault.c` and never read, and the
+stick is applied in view space; the cvar that would enable it,
+`vr_walkdirection`, still gates the dead assignment. A good idea they seem to
+have abandoned, not a proven one — which is the more reason to try it on the
+headset before trusting it.
+
+### Rendering ideas there that are worth having
+
+**A projection layer and a quad layer in the same frame** (`TBXR_Common.c:1576`).
+On flat frames they submit a black projection layer *underneath* the quad, where
+`VR_SubmitFrame` submits one or the other. That is exactly the mechanism the
+missing pointer ray and controller models need: a minimal 3D pass carrying the
+beam and the hands, with the menu quad composited over it.
+
+**Multisampled render to texture** (`glFramebufferTexture2DMultisampleEXT`,
+`TBXR_Common.c:367`). It resolves in tile memory on Adreno, so MSAA costs close
+to nothing, and aliasing is far more objectionable in a headset than on a
+monitor. Both projects currently ship `sampleCount = 1` — theirs is wired up but
+switched off — so this is a measurement to make once there is a frame budget to
+spend it from.
+
+**Scope zoom by narrowing the composition layer's FOV** (`TBXR_Common.c:1557`)
+rather than touching the projection matrix, so magnification costs the renderer
+nothing. Applies directly to the sniper scopes and the binoculars. Read their
+render-side FOV path before copying it; the two halves have to agree.
+
+What is *not* there, despite being the obvious things to look for:
+`XR_FB_display_refresh_rate` is vestigial — the entry points are declared,
+nulled and never resolved, and `TBXR_GetRefreshRate` returns a hardcoded 90.
+There is no foveation, no space warp and no performance-level hints; their
+instance extension list is the same two this port already enables. Anything in
+that direction is original work.

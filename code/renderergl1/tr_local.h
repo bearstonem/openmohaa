@@ -49,8 +49,24 @@ QGL_3_0_PROCS;
 extern "C" {
 #endif
 
+#ifdef USE_GL4ES
+// 16 bit indices on OpenGL ES, which is what gl4es is running on underneath.
+// ES 2.0 has no 32 bit element indices at all without GL_OES_element_index_uint,
+// so glDrawElements with GL_UNSIGNED_INT draws nothing and reports nothing.
+// Immediate mode is unaffected - gl4es collects glBegin/glEnd itself and picks
+// its own index type - which is why a build with this wrong renders cinematics
+// and the loading screen perfectly while every menu, every HUD element and the
+// entire world are missing.
+//
+// Costs nothing here. Indices only ever address within one tess batch, and
+// SHADER_MAX_VERTEXES is 2048; RTCWQuest runs the same renderer at 6000 with
+// shorts (their tr_local.h, under HAVE_GLES).
+#define GL_INDEX_TYPE		GL_UNSIGNED_SHORT
+typedef unsigned short glIndex_t;
+#else
 #define GL_INDEX_TYPE		GL_UNSIGNED_INT
 typedef unsigned int glIndex_t;
+#endif
 
 // fast float to int conversion
 #if id386 && !( (defined __linux__ || defined __FreeBSD__ ) && (defined __i386__ ) ) // rb010123
@@ -1540,6 +1556,13 @@ extern cvar_t	*r_ext_max_anisotropy;
 extern cvar_t	*r_forceClampToEdge;
 extern cvar_t	*r_geForce3WorkAround;
 extern cvar_t	*r_reset_tc_array;
+extern cvar_t	*r_flatColor;
+extern cvar_t	*r_traceSurf;
+extern cvar_t	*r_forceGenericStage;
+extern cvar_t	*r_noFog;
+extern cvar_t	*r_noCull;
+extern cvar_t	*r_noDepth;
+extern cvar_t	*r_invertCull;
 
 extern	cvar_t	*r_nobind;						// turns off binding to appropriate textures
 extern	cvar_t	*r_singleShader;				// make most world faces use default shader

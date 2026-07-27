@@ -69,6 +69,8 @@ extern void (APIENTRYP qglUnlockArraysEXT) (void);
 	GLE(void, GenTextures, GLsizei n, GLuint *textures ) \
 	GLE(void, GetBooleanv, GLenum pname, GLboolean *params) \
 	GLE(GLenum, GetError, void) \
+	GLE(void, GetFloatv, GLenum pname, GLfloat *params) \
+	GLE(GLboolean, IsEnabled, GLenum cap) \
 	GLE(void, GetIntegerv, GLenum pname, GLint *params) \
 	GLE(const GLubyte *, GetString, GLenum name) \
 	GLE(void, LineWidth, GLfloat width) \
