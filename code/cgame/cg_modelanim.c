@@ -1031,7 +1031,51 @@ static qboolean CG_VRPlaceViewModel(refEntity_t *model)
     model->origin[2] += headHeight * worldScale;
 
     angles[YAW] = AngleNormalize360(angles[YAW] + cg.refdefViewAngles[YAW]);
-    AnglesToAxis(angles, model->axis);
+
+    //
+    // Per weapon alignment.
+    //
+    // The view model is authored to sit at the camera with the arms reaching
+    // forward, so anchoring its origin at the hand leaves the model's own
+    // internal offset in place and the gun ends up somewhere near the elbow.
+    // Every weapon needs its own correction, and no amount of getting the hand
+    // pose right removes the need for one.
+    //
+    // Same shape as the reference's vr_weapon_adjustment_<id>
+    // (rtcw cg_weapons.c, VrInputWeaponAlign.c):
+    //
+    //     scale,right,up,forward,pitch,yaw,roll
+    //
+    // The rotation is composed in the weapon's own frame rather than added to
+    // the angles, which is only correct for one axis at a time. The offset is
+    // then applied along the *corrected* axes - right, up and forward as the
+    // weapon now points - which is why a model that rotates correctly can still
+    // sit in the wrong place: the two have to be done in that order.
+    //
+    {
+        cvar_t *adjust = cgi.Cvar_Get("vr_weaponAdjust", "1,0,0,0,0,0,0", CVAR_ARCHIVE);
+        vec3_t  off = {0.0f, 0.0f, 0.0f};
+        vec3_t  adjustAng = {0.0f, 0.0f, 0.0f};
+        float   adjustScale = 1.0f;
+        vec3_t  baseAxis[3], adjAxis[3];
+
+        if (adjust && adjust->string[0]) {
+            sscanf(adjust->string, "%f,%f,%f,%f,%f,%f,%f",
+                &adjustScale, &off[0], &off[1], &off[2],
+                &adjustAng[PITCH], &adjustAng[YAW], &adjustAng[ROLL]);
+        }
+
+        VectorScale(off, adjustScale, off);
+
+        AnglesToAxis(angles, baseAxis);
+        AnglesToAxis(adjustAng, adjAxis);
+        MatrixMultiply(adjAxis, baseAxis, model->axis);
+
+        // AnglesToAxis gives forward, left, up - so right is -axis[1].
+        VectorMA(model->origin, off[2], model->axis[0], model->origin);
+        VectorMA(model->origin, off[1], model->axis[2], model->origin);
+        VectorMA(model->origin, -off[0], model->axis[1], model->origin);
+    }
 
     return qtrue;
 }

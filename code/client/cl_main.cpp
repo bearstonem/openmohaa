@@ -2680,11 +2680,64 @@ CL_Frame
 
 ==================
 */
+/*
+==================
+CL_RunStartupCommand
+
+Runs vr_testStart once, a moment after the player is actually in the world.
+
+Setting up a weapon test otherwise means playing through to wherever the game
+hands one over, every single build. There is no console in a headset to type
+"give" into either, so the command has to come from the config - and it cannot
+simply go in autoexec.cfg, which runs before there is a map, let alone a player
+to give anything to.
+
+The delay is because CA_ACTIVE arrives before the player entity has finished
+spawning, and a give aimed at nothing is silently dropped.
+==================
+*/
+static void CL_RunStartupCommand( void ) {
+	static qboolean	fired;
+	static int		activeSince;
+	cvar_t			*cmd;
+
+	if ( clc.state != CA_ACTIVE ) {
+		// Armed again for the next map, so this works on every load rather
+		// than only the first.
+		activeSince = 0;
+		fired = qfalse;
+		return;
+	}
+
+	if ( fired ) {
+		return;
+	}
+
+	if ( !activeSince ) {
+		activeSince = cls.realtime;
+		return;
+	}
+
+	if ( cls.realtime - activeSince < 1500 ) {
+		return;
+	}
+
+	cmd = Cvar_Get( "vr_testStart", "", CVAR_TEMP );
+	fired = qtrue;
+
+	if ( cmd && cmd->string[0] ) {
+		Com_Printf( "vr_testStart: %s\n", cmd->string );
+		Cbuf_AddText( va( "%s\n", cmd->string ) );
+	}
+}
+
 void CL_Frame ( int msec ) {
 
 	if ( !com_cl_running->integer ) {
 		return;
 	}
+
+	CL_RunStartupCommand();
 
 #ifdef USE_CURL
 	if(clc.downloadCURLM) {
