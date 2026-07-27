@@ -88,6 +88,19 @@ typedef struct {
 	// if the pointers are not NULL, timing info will be returned
 	void	(*EndFrame)( int *frontEndMsec, int *backEndMsec );
 
+	// Redirects everything the renderer would draw to the window into another
+	// framebuffer instead. Used to render an eye into an OpenXR swapchain
+	// image; zero restores the window. May be NULL on renderers that do not
+	// support it.
+	void	(*SetDefaultFramebuffer)( unsigned int framebuffer );
+
+	// The eye being rendered, for stereo from a headset. origin and angles are
+	// the head pose relative to the game's camera, in engine units and degrees;
+	// the tangents are the eye's asymmetric frustum edges at unit distance.
+	// Passing NULL for origin returns to the ordinary flat projection.
+	void	(*SetVRView)( const float *origin, const vec3_t *axis,
+					float tanLeft, float tanRight, float tanUp, float tanDown );
+
 
 	int		(*MarkFragments)( int numPoints, const vec3_t *points, const vec3_t projection,
 				   int maxPoints, vec3_t pointBuffer, int maxFragments, markFragment_t *fragmentBuffer, float fRadiusSquared );
@@ -331,6 +344,13 @@ typedef struct {
     //
     int (*SKEL_GetMorphWeightFrame)(void *skeletor, int index, float time, int *data);
     int (*SKEL_GetBoneParent)(void *skeletor, int boneIndex);
+
+    // The per-eye render size a headset requires, or false when not in VR.
+    // Asked for directly rather than passed through cvars: r_mode and friends
+    // are latched and are registered by the renderer itself, so a value set
+    // before the renderer starts is not in effect for its first mode change -
+    // which left the whole frame drawn into one corner of the eye texture.
+    qboolean (*GetVRRenderResolution)(int *width, int *height);
 } refimport_t;
 
 

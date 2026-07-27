@@ -29,6 +29,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../qcommon/localization.h"
 #include "../qcommon/bg_compat.h"
 #include "../sys/sys_local.h"
+#ifdef USE_OPENXR
+#include "../vr/vr_common.h"
+#endif
 #include "../sys/sys_update_checker.h"
 #include "../uilib/uimessage.h"
 
@@ -2898,6 +2901,13 @@ CL_ShutdownRef
 ============
 */
 void CL_ShutdownRef( void ) {
+#ifdef USE_OPENXR
+	// The session and its swapchains belong to the GL context that is about to
+	// be destroyed; left alone they would outlive it and every swapchain
+	// acquire afterwards would fail.
+	VR_DestroySession();
+#endif
+
 	if ( re.Shutdown ) {
 		re.Shutdown( qtrue );
 	}
@@ -2932,6 +2942,12 @@ void CL_StartHunkUsers( qboolean rendererOnly ) {
 	if ( !cls.rendererRegistered ) {
 		cls.rendererRegistered = qtrue;
 		CL_BeginRegistration();
+
+#ifdef USE_OPENXR
+		// The GL context exists from here, which is what the session binds to.
+		VR_CreateSession();
+#endif
+
 		UI_ResolutionChange();
 	}
 
@@ -3187,6 +3203,22 @@ qboolean CL_IsRendererLoaded(void) {
 CL_InitRef
 ============
 */
+/*
+============
+CL_GetVRRenderResolution
+============
+*/
+static qboolean CL_GetVRRenderResolution( int *width, int *height ) {
+#ifdef USE_OPENXR
+	if ( VR_Enabled() ) {
+		VR_GetRenderResolution( width, height );
+		return ( *width > 0 && *height > 0 ) ? qtrue : qfalse;
+	}
+#endif
+
+	return qfalse;
+}
+
 void CL_InitRef( void ) {
 	refimport_t	ri;
 	refexport_t	*ret;
@@ -3335,6 +3367,7 @@ void CL_InitRef( void ) {
     ri.TIKI_GetLocalFromGlobal = CL_RefTIKI_GetLocalFromGlobal;
 
 	ri.SKEL_GetBoneParent = CL_RefSKEL_GetBoneParent;
+	ri.GetVRRenderResolution = CL_GetVRRenderResolution;
 	ri.SKEL_GetMorphWeightFrame = CL_RefSKEL_GetMorphWeightFrame;
 
 	ret = GetRefAPI( REF_API_VERSION, &ri );
@@ -3553,6 +3586,12 @@ void CL_Init( void ) {
 	cl_bCLSystemStarted = qtrue;
 
 	Com_Printf( "----- Client Initialization -----\n" );
+
+#ifdef USE_OPENXR
+	// Before the renderer, because the eye resolution the runtime asks for is
+	// what the window and the render targets are sized to.
+	VR_Init();
+#endif
 
 	start = Sys_Milliseconds();
 

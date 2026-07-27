@@ -26,6 +26,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include <android/log.h>
 #include <dlfcn.h>
 #include <signal.h>
+#include <stdint.h>
+#include <string.h>
+#include <ucontext.h>
 #include <unistd.h>
 #include <unwind.h>
 
@@ -185,6 +188,106 @@ void Sys_PrintBackTrace() {
 		}
 
 		Sys_AndroidLog(line);
+	}
+}
+
+/*
+==================
+Sys_AndroidDescribeAddress
+
+Names whatever the address falls inside, so a bare pointer becomes a library
+and a symbol.
+==================
+*/
+static void Sys_AndroidDescribeAddress(const void *address, char *out, size_t outSize)
+{
+	Dl_info info;
+
+	if (dladdr(address, &info) && info.dli_fname) {
+		const char *slash = strrchr(info.dli_fname, '/');
+		const char *module = slash ? slash + 1 : info.dli_fname;
+
+		if (info.dli_sname && info.dli_saddr) {
+			Com_sprintf(out, outSize, "%p  %s  %s+%u", address, module, info.dli_sname,
+				(unsigned int)((uintptr_t)address - (uintptr_t)info.dli_saddr));
+			return;
+		}
+
+		Com_sprintf(out, outSize, "%p  %s+%u", address, module,
+			(unsigned int)((uintptr_t)address - (uintptr_t)info.dli_fbase));
+		return;
+	}
+
+	Com_sprintf(out, outSize, "%p  <unmapped>", address);
+}
+
+/*
+==================
+Sys_AndroidCrashHandler
+
+Reports the fault before handing over to the engine's own handler. The register
+state is the part that matters: the unwinder stops at the signal frame, so the
+program counter carried in the context is the only reliable account of where
+the process actually died.
+==================
+*/
+static void Sys_AndroidCrashHandler(int signum, siginfo_t *info, void *contextPtr)
+{
+	char line[512];
+	char described[256];
+
+	Com_sprintf(line, sizeof(line), "Fatal signal %d at address %p", signum,
+		info ? info->si_addr : NULL);
+	Sys_AndroidLog(line);
+
+#if defined(__aarch64__)
+	if (contextPtr) {
+		const ucontext_t *context = (const ucontext_t *)contextPtr;
+
+		Sys_AndroidDescribeAddress((const void *)context->uc_mcontext.pc, described, sizeof(described));
+		Com_sprintf(line, sizeof(line), "  pc  %s", described);
+		Sys_AndroidLog(line);
+
+		// x30 is the link register: where the faulting function would have
+		// returned to, which identifies the caller when pc is in a stripped or
+		// JIT-generated region.
+		Sys_AndroidDescribeAddress((const void *)context->uc_mcontext.regs[30], described, sizeof(described));
+		Com_sprintf(line, sizeof(line), "  lr  %s", described);
+		Sys_AndroidLog(line);
+	}
+#endif
+
+	Sys_SigHandler(signum);
+}
+
+/*
+==================
+Sys_AndroidInstallCrashHandler
+==================
+*/
+void Sys_AndroidInstallCrashHandler(void)
+{
+	static char      signalStack[SIGSTKSZ * 4];
+	const int        signals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+	struct sigaction action;
+	stack_t          altStack;
+	size_t           i;
+
+	// A stack overflow faults again the moment the handler pushes a frame, and
+	// the second fault is delivered as an unrecoverable kill with nothing
+	// logged. Give the handler its own stack so it survives to report.
+	altStack.ss_sp = signalStack;
+	altStack.ss_size = sizeof(signalStack);
+	altStack.ss_flags = 0;
+	sigaltstack(&altStack, NULL);
+
+	memset(&action, 0, sizeof(action));
+	action.sa_sigaction = Sys_AndroidCrashHandler;
+	action.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
+	sigemptyset(&action.sa_mask);
+
+	for (i = 0; i < ARRAY_LEN(signals); i++) {
+		sigaction(signals[i], &action, NULL);
 	}
 }
 

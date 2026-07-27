@@ -891,9 +891,15 @@ int main( int argc, char **argv )
 	// Installed before Com_Init rather than after it: startup is exactly when
 	// renderer and filesystem bring-up crash on a new platform, and a fault
 	// there used to die with no backtrace at all.
+#ifdef __ANDROID__
+	// Installs the fatal signals itself, with siginfo and a private stack so a
+	// crash can report where it happened rather than only that it happened.
+	Sys_AndroidInstallCrashHandler();
+#else
 	signal( SIGILL, Sys_SigHandler );
 	signal( SIGFPE, Sys_SigHandler );
 	signal( SIGSEGV, Sys_SigHandler );
+#endif
 	signal( SIGTERM, Sys_SigHandler );
 	signal( SIGINT, Sys_SigHandler );
 

@@ -2247,6 +2247,26 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 				dataFormat = GL_RGBA;
 				dataType = GL_UNSIGNED_SHORT_4_4_4_4;
 				break;
+			// Depth textures are the render target formats, needed once
+			// framebuffer objects are in use. ES 3.0 takes sized internal
+			// formats directly, so these pass through unchanged and only the
+			// data type has to be spelled out.
+			case GL_DEPTH_COMPONENT16:
+				dataFormat = GL_DEPTH_COMPONENT;
+				dataType = GL_UNSIGNED_SHORT;
+				break;
+			case GL_DEPTH_COMPONENT24:
+				dataFormat = GL_DEPTH_COMPONENT;
+				dataType = GL_UNSIGNED_INT;
+				break;
+			case GL_DEPTH_COMPONENT32F:
+				dataFormat = GL_DEPTH_COMPONENT;
+				dataType = GL_FLOAT;
+				break;
+			case GL_DEPTH24_STENCIL8:
+				dataFormat = GL_DEPTH_STENCIL;
+				dataType = GL_UNSIGNED_INT_24_8;
+				break;
 			default:
 				ri.Error( ERR_DROP, "Missing OpenGL ES support for image '%s' with internal format 0x%X\n", name, internalFormat );
 		}

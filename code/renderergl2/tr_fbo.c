@@ -239,7 +239,7 @@ void FBO_Bind(FBO_t * fbo)
 		GLimp_LogComment(va("--- FBO_Bind( %s ) ---\n", fbo ? fbo->name : "NULL"));
 	}
 
-	GL_BindFramebuffer(GL_FRAMEBUFFER, fbo ? fbo->frameBuffer : 0);
+	GL_BindFramebuffer(GL_FRAMEBUFFER, fbo ? fbo->frameBuffer : glState.defaultFBO);
 	glState.currentFBO = fbo;
 }
 
@@ -416,7 +416,7 @@ void FBO_Init(void)
 
 	GL_CheckErrors();
 
-	GL_BindFramebuffer(GL_FRAMEBUFFER, 0);
+	GL_BindFramebuffer(GL_FRAMEBUFFER, glState.defaultFBO);
 	glState.currentFBO = NULL;
 }
 
@@ -681,6 +681,67 @@ void FBO_FastBlit(const FBO_t *src, ivec4_t srcBox, FBO_t *dst, ivec4_t dstBox, 
 	                      dstBoxFinal[0], dstBoxFinal[1], dstBoxFinal[2], dstBoxFinal[3],
 						  buffers, filter);
 
-	GL_BindFramebuffer(GL_FRAMEBUFFER, 0);
+	GL_BindFramebuffer(GL_FRAMEBUFFER, glState.defaultFBO);
 	glState.currentFBO = NULL;
+}
+
+/*
+============
+RE_SetDefaultFramebuffer
+
+Substitutes the framebuffer the renderer treats as the screen. In VR each eye
+is an OpenXR swapchain image, so the whole render path - including the
+post-processing resolve, which is what actually reaches the display - lands
+there instead of in the window. Zero restores the window.
+============
+*/
+void RE_SetDefaultFramebuffer(unsigned int framebuffer)
+{
+	if (glState.defaultFBO == framebuffer) {
+		return;
+	}
+
+	glState.defaultFBO = framebuffer;
+
+	// Rendering into a framebuffer means something else is presenting it, so
+	// the window must not also be swapped.
+	GLimp_SetPresentsToWindow(framebuffer == 0 ? qtrue : qfalse);
+
+	// Whatever was bound describes the old target, so force the next FBO_Bind
+	// to issue a real bind rather than believe its cached state.
+	glState.currentFBO = NULL;
+
+	// Only the renderer's own binding is conditional here. The caller has
+	// already bound the target itself, because when framebuffers are disabled
+	// this entry point does not exist to be called.
+	if (qglBindFramebuffer) {
+		GL_BindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+	}
+}
+
+/*
+============
+RE_SetVRView
+============
+*/
+vrViewState_t vrView;
+
+void RE_SetVRView(const float *origin, const vec3_t *axis,
+		float tanLeft, float tanRight, float tanUp, float tanDown)
+{
+	if (!origin || !axis) {
+		vrView.active = qfalse;
+		return;
+	}
+
+	VectorCopy(origin, vrView.origin);
+	VectorCopy(axis[0], vrView.axis[0]);
+	VectorCopy(axis[1], vrView.axis[1]);
+	VectorCopy(axis[2], vrView.axis[2]);
+
+	vrView.tanLeft = tanLeft;
+	vrView.tanRight = tanRight;
+	vrView.tanUp = tanUp;
+	vrView.tanDown = tanDown;
+	vrView.active = qtrue;
 }

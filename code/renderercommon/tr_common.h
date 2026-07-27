@@ -176,6 +176,13 @@ void		GLimp_Init( qboolean fixedFunction );
 void		GLimp_Shutdown( void );
 void		GLimp_EndFrame( void );
 
+// When something other than the window presents the finished frame - a VR
+// compositor reading the eye textures - swapping the window as well presents
+// a surface nothing is looking at, and blocks on the display's own refresh
+// while doing it. Two presentation paths then run at unrelated rates, which
+// shows up as flicker.
+void		GLimp_SetPresentsToWindow( qboolean presents );
+
 void		GLimp_LogComment( char *comment );
 void		GLimp_Minimize(void);
 

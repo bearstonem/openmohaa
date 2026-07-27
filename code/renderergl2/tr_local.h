@@ -1876,6 +1876,11 @@ typedef struct {
 	mat4_t          boneMatrix[IQM_MAX_JOINTS];
 	uint32_t        vertexAttribsEnabled;  // global if no VAOs, tess only otherwise
 	FBO_t          *currentFBO;
+
+	// What "no FBO" resolves to. Zero is the window, which is the normal case;
+	// in VR each eye's swapchain image is substituted here so that the whole
+	// renderer draws into the headset without knowing about it.
+	GLuint          defaultFBO;
 	vao_t          *currentVao;
 	mat4_t        modelview;
 	mat4_t        projection;
@@ -2215,6 +2220,27 @@ typedef struct {
     int farclip;
 } trGlobals_t;
 
+/*
+The eye currently being rendered, when driven by a headset.
+
+Kept outside trGlobals_t for the same reason as glState: it describes the
+display rather than the scene, and must survive a renderer re-init.
+*/
+typedef struct {
+	qboolean	active;
+	vec3_t		origin;		// head offset from the game's camera, engine units
+	vec3_t		axis[3];	// head orientation as forward/left/up
+	float		tanLeft;	// asymmetric frustum edges at unit distance
+	float		tanRight;
+	float		tanUp;
+	float		tanDown;
+} vrViewState_t;
+
+extern vrViewState_t	vrView;
+
+void RE_SetVRView( const float *origin, const vec3_t *axis,
+			float tanLeft, float tanRight, float tanUp, float tanDown );
+
 extern backEndState_t	backEnd;
 extern trGlobals_t	tr;
 extern glstate_t	glState;		// outside of TR since it shouldn't be cleared during ref re-init
@@ -2242,6 +2268,7 @@ extern cvar_t	*r_stereoSeparation;			// separation of cameras for stereo renderi
 
 extern cvar_t	*r_measureOverdraw;		// enables stencil buffer overdraw measurement
 
+extern cvar_t	*r_vrTrace;				// log the composed VR camera once a second
 extern cvar_t	*r_lodbias;				// push/pull LOD transitions
 extern cvar_t	*r_lodscale;
 

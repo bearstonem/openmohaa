@@ -518,9 +518,77 @@ Rendering a scene may require multiple views to be rendered
 to handle mirrors,
 @@@@@@@@@@@@@@@@@@@@@
 */
+/*
+====================
+R_ApplyVRView
+
+Puts the headset on top of whatever camera the game asked for.
+
+Done here rather than in the game code because every camera reaches the
+renderer through this one function - the player's view, cutscene cameras,
+ladder climbs, death animations - so head tracking follows all of them without
+each having to know about VR.
+
+The game's camera decides where the body is and which way it faces. Everything
+else comes from the headset: pitch and roll are taken from the head alone,
+since blending them with the game's would fight the viewer's own neck.
+====================
+*/
+static void R_ApplyVRView( refdef_t *fd ) {
+	vec3_t	baseAngles, bodyAngles, bodyAxis[3];
+	int		i;
+
+	if ( !vrView.active ) {
+		return;
+	}
+
+	// The game's camera decides where the body stands and which way it faces;
+	// the headset decides everything about where the eyes are relative to that.
+	// Only the heading is taken from the game - its pitch and roll would fight
+	// the viewer's own neck.
+	vectoangles( fd->viewaxis[0], baseAngles );
+	VectorSet( bodyAngles, 0, baseAngles[YAW], 0 );
+	AnglesToAxis( bodyAngles, bodyAxis );
+
+	// Rotate the head's axes into the body's frame. Composed as a rotation
+	// rather than by adding Euler angles: adding them only happens to work
+	// while pitch and roll are small, and turns every head movement into a
+	// twist once they are not.
+	for ( i = 0; i < 3; i++ ) {
+		vec3_t rotated;
+
+		VectorScale(   bodyAxis[0],  vrView.axis[i][0], rotated );
+		VectorMA( rotated, vrView.axis[i][1], bodyAxis[1], rotated );
+		VectorMA( rotated, vrView.axis[i][2], bodyAxis[2], rotated );
+		VectorCopy( rotated, fd->viewaxis[i] );
+	}
+
+	if ( r_vrTrace && r_vrTrace->integer ) {
+		static int lastTrace;
+		int now = ri.Milliseconds();
+
+		if ( now - lastTrace > 1000 ) {
+			lastTrace = now;
+			ri.Printf( PRINT_ALL,
+				"VR view: org %.0f %.0f %.0f body yaw %.1f | head off %.1f %.1f %.1f fwd %.2f %.2f %.2f\n",
+				fd->vieworg[0], fd->vieworg[1], fd->vieworg[2], baseAngles[YAW],
+				vrView.origin[0], vrView.origin[1], vrView.origin[2],
+				vrView.axis[0][0], vrView.axis[0][1], vrView.axis[0][2] );
+		}
+	}
+
+	// The head's offset within the play space, turned to face the same way the
+	// body does before it is added. Leaning left stays leaning left whichever
+	// way the player has turned.
+	VectorMA( fd->vieworg, vrView.origin[0], bodyAxis[0], fd->vieworg );
+	VectorMA( fd->vieworg, vrView.origin[1], bodyAxis[1], fd->vieworg );
+	VectorMA( fd->vieworg, vrView.origin[2], bodyAxis[2], fd->vieworg );
+}
+
 void RE_RenderScene( const refdef_t *fd ) {
 	viewParms_t		parms;
 	int				startTime;
+	refdef_t		vrRefdef;
 
 	if ( !tr.registered ) {
 		return;
@@ -529,6 +597,12 @@ void RE_RenderScene( const refdef_t *fd ) {
 
 	if ( r_norefresh->integer ) {
 		return;
+	}
+
+	if ( vrView.active ) {
+		vrRefdef = *fd;
+		R_ApplyVRView( &vrRefdef );
+		fd = &vrRefdef;
 	}
 
 	startTime = ri.Milliseconds();

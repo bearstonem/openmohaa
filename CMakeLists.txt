@@ -21,6 +21,7 @@ option(BUILD_STANDALONE "Build binaries for standalone games" OFF)
 
 option(USE_RENDERER_DLOPEN "Dynamically load the renderer(s)" ON)
 option(USE_OPENAL "OpenAL audio" ON)
+option(USE_OPENXR "OpenXR stereo rendering and tracking" OFF)
 option(USE_OPENAL_DLOPEN "Dynamically load OpenAL" ON)
 option(USE_HTTP "HTTP download support" ON)
 option(USE_CODEC_VORBIS "Ogg Vorbis support" ON)

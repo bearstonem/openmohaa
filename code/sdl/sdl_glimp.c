@@ -1191,10 +1191,18 @@ GLimp_EndFrame
 Responsible for doing a swapbuffers
 ===============
 */
+static qboolean glimp_presentsToWindow = qtrue;
+
+void GLimp_SetPresentsToWindow( qboolean presents )
+{
+	glimp_presentsToWindow = presents;
+}
+
 void GLimp_EndFrame( void )
 {
-	// don't flip if drawing to front buffer
-	if ( Q_stricmp( r_drawBuffer->string, "GL_FRONT" ) != 0 )
+	// don't flip if drawing to front buffer, or if the window is not what the
+	// viewer is actually looking at
+	if ( glimp_presentsToWindow && Q_stricmp( r_drawBuffer->string, "GL_FRONT" ) != 0 )
 	{
 		SDL_GL_SwapWindow( SDL_window );
 	}

@@ -29,6 +29,9 @@ set(BUILD_GAME_QVMS OFF CACHE INTERNAL "")
 # Only for downloading content off a server; not needed to get the game up.
 set(USE_HTTP OFF CACHE INTERNAL "")
 
+# The whole point of the Android build here is the headset.
+set(USE_OPENXR ON CACHE INTERNAL "")
+
 # There is no bundled SDL binary for Android; it is built from source.
 set(USE_INTERNAL_SDL OFF CACHE INTERNAL "")
 
@@ -55,7 +58,7 @@ function(android_stage_apk_libraries)
     set(APK_LIBRARIES ${CMAKE_SYSROOT}/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}/libc++_shared.so)
     set(APK_TARGETS)
 
-    foreach(APK_TARGET IN ITEMS ${CLIENT_NAME} SDL2 OpenAL ${CGAME_MODULE} ${GAME_MODULE})
+    foreach(APK_TARGET IN ITEMS ${CLIENT_NAME} SDL2 OpenAL openxr_loader ${CGAME_MODULE} ${GAME_MODULE})
         if(TARGET ${APK_TARGET})
             list(APPEND APK_TARGETS ${APK_TARGET})
             list(APPEND APK_LIBRARIES $<TARGET_FILE:${APK_TARGET}>)

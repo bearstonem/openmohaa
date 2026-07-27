@@ -207,6 +207,7 @@ cvar_t	*r_lodCurveError;
 cvar_t	*r_fullscreen;
 cvar_t  *r_noborder;
 
+cvar_t	*r_vrTrace;
 cvar_t	*r_customwidth;
 cvar_t	*r_customheight;
 cvar_t	*r_customPixelAspect;
@@ -482,6 +483,12 @@ static int	s_numVidModes = ARRAY_LEN( r_vidModes );
 qboolean R_GetModeInfo( int *width, int *height, float *windowAspect, int mode ) {
 	vidmode_t	*vm;
 	float			pixelAspect;
+
+	// A headset dictates the render size; whatever r_mode says is irrelevant.
+	if ( ri.GetVRRenderResolution && ri.GetVRRenderResolution( width, height ) ) {
+		*windowAspect = (float)*width / (float)*height;
+		return qtrue;
+	}
 
 	if ( mode < -1 ) {
 		return qfalse;
@@ -1341,7 +1348,16 @@ void R_Register( void )
 	r_ext_compiled_vertex_array = ri.Cvar_Get( "r_ext_compiled_vertex_array", "1", CVAR_ARCHIVE | CVAR_LATCH);
 	r_ext_texture_env_add = ri.Cvar_Get( "r_ext_texture_env_add", "1", CVAR_ARCHIVE | CVAR_LATCH);
 
+#ifdef __ANDROID__
+	// The renderer's own render targets buy nothing in VR - each eye is already
+	// an OpenXR swapchain image, which is what the compositor displays - and
+	// they would cost a second full resolution pass and resolve per eye at
+	// 1680x1760. The entry points are still loaded, so the eye framebuffers
+	// work; this only turns off the renderer's internal use of them.
+	r_ext_framebuffer_object = ri.Cvar_Get( "r_ext_framebuffer_object", "0", CVAR_ARCHIVE | CVAR_LATCH);
+#else
 	r_ext_framebuffer_object = ri.Cvar_Get( "r_ext_framebuffer_object", "1", CVAR_ARCHIVE | CVAR_LATCH);
+#endif
 	r_ext_texture_float = ri.Cvar_Get( "r_ext_texture_float", "1", CVAR_ARCHIVE | CVAR_LATCH);
 	r_ext_framebuffer_multisample = ri.Cvar_Get( "r_ext_framebuffer_multisample", "0", CVAR_ARCHIVE | CVAR_LATCH);
 	r_arb_seamless_cube_map = ri.Cvar_Get( "r_arb_seamless_cube_map", "0", CVAR_ARCHIVE | CVAR_LATCH);
@@ -1368,6 +1384,7 @@ void R_Register( void )
 	r_mode = ri.Cvar_Get( "r_mode", "-2", CVAR_ARCHIVE | CVAR_LATCH );
 	r_fullscreen = ri.Cvar_Get( "r_fullscreen", "1", CVAR_ARCHIVE );
 	r_noborder = ri.Cvar_Get("r_noborder", "0", CVAR_ARCHIVE | CVAR_LATCH);
+	r_vrTrace = ri.Cvar_Get( "r_vrTrace", "0", 0 );
 	r_customwidth = ri.Cvar_Get( "r_customwidth", "1600", CVAR_ARCHIVE | CVAR_LATCH );
 	r_customheight = ri.Cvar_Get( "r_customheight", "1024", CVAR_ARCHIVE | CVAR_LATCH );
 	r_customPixelAspect = ri.Cvar_Get( "r_customPixelAspect", "1", CVAR_ARCHIVE | CVAR_LATCH );
@@ -1989,6 +2006,8 @@ refexport_t *GetRefAPI ( int apiVersion, refimport_t *rimp ) {
 
 	re.BeginFrame = RE_BeginFrame;
 	re.EndFrame = RE_EndFrame;
+	re.SetDefaultFramebuffer = RE_SetDefaultFramebuffer;
+	re.SetVRView = RE_SetVRView;
 
 	re.MarkFragments = R_MarkFragments;
 	re.LerpTag = R_LerpTag;

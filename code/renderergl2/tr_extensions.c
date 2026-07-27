@@ -159,6 +159,33 @@ void GLimp_InitExtraExtensions(void)
 			ri.Printf(PRINT_ALL, result[2], extension);
 		}
 
+		// Framebuffer objects.
+		//
+		// These are core in OpenGL ES - the whole of
+		// QGL_ARB_framebuffer_object_PROCS is core in 3.0, with only blit and
+		// multisampled renderbuffers missing from 2.0. The desktop probing
+		// below is skipped entirely on ES, so without loading them here the
+		// renderer runs with framebuffers disabled and, worse, leaves every one
+		// of those entry points NULL for anything that calls them directly.
+		extension = "framebuffer object";
+		if (qglesMajorVersion >= 3)
+		{
+			glRefConfig.framebufferObject = !!r_ext_framebuffer_object->integer;
+			glRefConfig.framebufferBlit = qtrue;
+			glRefConfig.framebufferMultisample = qtrue;
+
+			qglGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &glRefConfig.maxRenderbufferSize);
+			qglGetIntegerv(GL_MAX_COLOR_ATTACHMENTS, &glRefConfig.maxColorAttachments);
+
+			QGL_ARB_framebuffer_object_PROCS;
+
+			ri.Printf(PRINT_ALL, result[glRefConfig.framebufferObject], extension);
+		}
+		else
+		{
+			ri.Printf(PRINT_ALL, result[2], extension);
+		}
+
 		goto done;
 	}
 

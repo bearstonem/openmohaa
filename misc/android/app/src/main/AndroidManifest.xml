@@ -5,6 +5,15 @@
     <!-- renderergl2 is driven as GLES 3; renderergl1 is not built for Android -->
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
 
+    <!--
+        Together with the VR intent category below, this is what makes the
+        headset launch the app immersively instead of as a flat panel.
+    -->
+    <uses-feature
+        android:name="android.hardware.vr.headtracking"
+        android:required="true"
+        android:version="1" />
+
     <uses-feature
         android:name="android.hardware.touchscreen"
         android:required="false" />
@@ -49,14 +58,8 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="com.oculus.intent.category.VR" />
             </intent-filter>
-
-            <!--
-                Phase 3 adds the OpenXR session. That is also when this activity
-                gains <category android:name="com.oculus.intent.category.VR" />
-                and the headtracking uses-feature, which together make the Quest
-                launch it as an immersive app rather than a 2D panel.
-            -->
         </activity>
     </application>
 

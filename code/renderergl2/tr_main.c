@@ -851,11 +851,31 @@ void R_SetupProjection(viewParms_t *dest, float zProj, float zFar, qboolean comp
 			stereoSep = 0;
 	}
 
-	ymax = zProj * tan(dest->fovY * M_PI / 360.0f);
-	ymin = -ymax;
+	if (vrView.active)
+	{
+		// A headset's per-eye frustum is not centred on the view axis - each
+		// eye sees further towards its own side than towards the nose. Using a
+		// symmetric approximation misaligns the two images by a few degrees,
+		// which reads as an image the eyes cannot fuse. The matrix below
+		// already carries the off-centre terms, so the runtime's own edges go
+		// straight in.
+		xmin = zProj * vrView.tanLeft;
+		xmax = zProj * vrView.tanRight;
+		ymin = zProj * vrView.tanDown;
+		ymax = zProj * vrView.tanUp;
 
-	xmax = zProj * tan(dest->fovX * M_PI / 360.0f);
-	xmin = -xmax;
+		// Stereo separation is the flat renderer's way of faking two eyes, and
+		// would be applied on top of a real one.
+		stereoSep = 0;
+	}
+	else
+	{
+		ymax = zProj * tan(dest->fovY * M_PI / 360.0f);
+		ymin = -ymax;
+
+		xmax = zProj * tan(dest->fovX * M_PI / 360.0f);
+		xmin = -xmax;
+	}
 
 	width = xmax - xmin;
 	height = ymax - ymin;

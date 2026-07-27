@@ -30,6 +30,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // and from a signal handler.
 void Sys_AndroidLog(const char *message);
 
+// Installs handlers for the fatal signals that report the faulting address and
+// program counter. The generic Unix handler cannot: it is installed with
+// signal(), so it never sees siginfo, and _Unwind_Backtrace cannot walk out of
+// the kernel's signal trampoline - which leaves a crash reported as four frames
+// of the handler itself and nothing about where the fault actually happened.
+void Sys_AndroidInstallCrashHandler(void);
+
 // Points the install path at the app's external files directory and makes it
 // the working directory. Must run before Com_Init, which is where FS_Startup
 // reads the install path. A no-op in the dedicated server, which has no

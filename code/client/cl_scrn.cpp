@@ -23,6 +23,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "client.h"
 #include "cl_ui.h"
+#ifdef USE_OPENXR
+#include "../vr/vr_common.h"
+#endif
 
 qboolean	scr_initialized;		// ready to draw
 stereoFrame_t	s_scr_stereoFrame;
@@ -494,6 +497,61 @@ SCR_SimpleUpdateScreen
 ==================
 */
 void SCR_SimpleUpdateScreen( void ) {
+#ifdef USE_OPENXR
+	// In VR the frame is drawn once per eye, each into its own swapchain image,
+	// and handed to the compositor rather than to the window. Deliberately two
+	// passes and no more: a third, mono pass to produce a flat image would cost
+	// half the frame again.
+	if( VR_Enabled() ) {
+		if( VR_BeginFrame() ) {
+			if( VR_UseScreenLayer() ) {
+				// Flat content: draw it once onto a panel fixed in front of the
+				// viewer. Drawing it into both eyes instead would give it no
+				// stereo disparity while each eye still warps it through its own
+				// asymmetric frustum, and the two images would never fuse.
+				VR_PrepareScreenLayer();
+
+				UpdateStereoSide( STEREO_CENTER );
+
+				if( com_speeds->integer ) {
+					re.EndFrame( &time_frontend, &time_backend );
+				}
+				else {
+					re.EndFrame( NULL, NULL );
+				}
+
+				VR_FinishScreenLayer();
+			}
+			else {
+				int eye;
+
+				for( eye = 0; eye < VR_MAX_EYES; eye++ ) {
+					VR_PrepareEye( eye );
+
+					// Deliberately STEREO_CENTER for both eyes.
+					// STEREO_LEFT/RIGHT select the GL_BACK_LEFT/RIGHT draw
+					// buffers of quad buffered stereo, a different mechanism
+					// entirely: here each eye already has its own framebuffer,
+					// and its viewpoint comes from the headset pose.
+					UpdateStereoSide( STEREO_CENTER );
+
+					if( com_speeds->integer ) {
+						re.EndFrame( &time_frontend, &time_backend );
+					}
+					else {
+						re.EndFrame( NULL, NULL );
+					}
+
+					VR_FinishEye( eye );
+				}
+			}
+		}
+
+		VR_SubmitFrame();
+		return;
+	}
+#endif
+
 	// if running in stereo, we need to draw the frame twice
 	if( cls.glconfig.stereoEnabled ) {
 		UpdateStereoSide( STEREO_LEFT );
