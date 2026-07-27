@@ -43,6 +43,9 @@ around any renderer restart.
 
 #include <EGL/egl.h>
 #include <GLES3/gl3.h>
+// GL_EXT_multisampled_render_to_texture is an ES extension and lives in the ES2
+// extension header even for an ES3 context.
+#include <GLES2/gl2ext.h>
 
 #define XR_USE_PLATFORM_ANDROID
 #define XR_USE_GRAPHICS_API_OPENGL_ES
@@ -129,18 +132,118 @@ static struct {
 	XrAction        selectAction;
 	XrAction        moveAction;
 	XrAction        turnAction;
+	XrAction        objectivesAction;
+	qboolean        objectivesWasDown;
+	XrAction        jumpAction;
+	qboolean        jumpWasDown;
+	XrAction        duckAction;
+	qboolean        duckWasDown;
+	XrAction        useAction;
+	qboolean        useWasDown;
 	XrPath          handPaths[2];
 	XrSpace         aimSpaces[2];
 	qboolean        actionsReady;
 	qboolean        selectWasDown;
 	int             pointerHand;
 
+	// XR_FB_display_refresh_rate, when the runtime offers it. Quest hands out
+	// 72Hz unless asked otherwise, and asking is most of a comfort upgrade for
+	// almost none of the work.
+	PFN_xrEnumerateDisplayRefreshRatesFB pfnEnumerateRefreshRates;
+	PFN_xrRequestDisplayRefreshRateFB    pfnRequestRefreshRate;
+	qboolean        refreshRateApplied;
+
+	// GL_EXT_multisampled_render_to_texture. On a tiler the resolve happens in
+	// tile memory on the way out, so multisampling costs a fraction of what the
+	// same thing costs on a desktop part - and aliasing is far more obvious
+	// through a headset than on a monitor.
+	int             samples;
+	PFNGLRENDERBUFFERSTORAGEMULTISAMPLEEXTPROC  glRenderbufferStorageMultisampleEXT;
+	PFNGLFRAMEBUFFERTEXTURE2DMULTISAMPLEEXTPROC glFramebufferTexture2DMultisampleEXT;
+
+	// A beam drawn from each hand, so the menu pointer has something to see.
+	// Its own tiny GL program: on a screen layer frame there is no 3D scene for
+	// the renderer to put it in, and this is a handful of triangles.
+	GLuint          beamProgram;
+	GLint           beamMvpLocation;
+	GLint           beamColorLocation;
+	GLuint          beamVertexArray;
+	GLuint          beamVertexBuffer;
+	qboolean        beamReady;
+
+	// Turns what the HUD drew into what the compositor can blend. See
+	// VR_ResolveWristPanel.
+	GLuint          panelProgram;
+	GLint           panelTextureLocation;
+	GLint           panelCropLocation;
+	GLuint          panelVertexArray;
+	qboolean        panelReady;
+	XrPosef         handPoses[2];
+	qboolean        handPoseValid[2];
+	float           pointerDistance;
+	qboolean        pointerLayerReady;
+
+	// See VR_SetBaseYaw.
+	float           baseYaw;
+
+	// Where the head was last frame, for turning walking into movement.
+	vec3_t          lastHeadOrigin;
+	qboolean        stepValid;
+
+	// Frame timing, split by phase. See VR_TraceFrameTiming.
+	int             eyeStart;
+	int             phaseWait;
+	int             phaseEyes;
+	int             phaseSubmit;
+	int             phaseFrontEnd;
+	int             phaseBackEnd;
+	int             phaseScene;
+	int             phaseIssue;
+	int             phaseWorld;
+	int             phaseHud;
+	int             phaseCgameHud;
+	int             phaseGpu;
+	int             traceEvents[VRTRACE_COUNT];
+	int             traceDrawMode;
+	int             traceHudPass;
+	int             traceNoMenus;
+	int             hudSetup;
+	int             hudFades;
+	int             hudPrints;
+	int             hudOverlays;
+	int             hudTail;
+
+	// The wrist panel. Shares the screen layer's buffers: the two are never up
+	// at once, since one is what the player sees instead of the world and the
+	// other is what they see over it.
+	qboolean        wristVisible;
+	XrPosef         wristPose;
+	qboolean        wristLayerReady;
+
+	// Built once a frame and drawn into whichever targets want it - both eyes
+	// during play, both eye images again on a menu frame.
+	float           beamVerts[2 * 2 * 36 * 3];
+	int             beamVertexCount;
+
+	cvar_t         *vr_wristPanel;
+	cvar_t         *vr_wristSize;
+	cvar_t         *vr_wristDistance;
+	cvar_t         *vr_wristBack;
+	cvar_t         *vr_wristCropX;
+	cvar_t         *vr_wristCropY;
+	cvar_t         *vr_wristCropW;
+	cvar_t         *vr_wristCropH;
+
 	cvar_t         *vr_worldscale;
 	cvar_t         *vr_screenDistance;
 	cvar_t         *vr_screenSize;
+	cvar_t         *vr_refreshRate;
+	cvar_t         *vr_msaa;
+	cvar_t         *vr_pointerBeam;
 } vr;
 
 static cvar_t *vr_traceTracking;
+static cvar_t *vr_traceFrame;
 
 /*
 ==================
@@ -171,6 +274,12 @@ static qboolean VR_CheckResult(XrResult result, const char *what)
 
 static void VR_CreateActions(void);
 static void VR_DestroySwapchain(vrSwapchain_t *swapchain);
+static void VR_CreateBeam(void);
+static void VR_DestroyBeam(void);
+static void VR_RenderPointerLayer(void);
+static void VR_ResolveWristPanel(GLuint target);
+static int  VR_BuildBeamGeometry(float *verts, int maxVerts);
+static void VR_DrawBeam(int eye, const float *verts, int vertexCount);
 
 /*
 ==================
@@ -248,15 +357,168 @@ static qboolean VR_InitLoader(void)
 
 /*
 ==================
+VR_TuningCvar
+
+A cvar whose default is still being argued with.
+
+Registered unarchived and forced to the default every start, because a value
+written out by an earlier build otherwise sits in the config and quietly wins:
+the config is exec'd before any of this runs, so Cvar_Get finds the cvar already
+there and keeps whatever it says, and a changed default does nothing at all.
+That cost a round trip on the device with vr_msaa, where multisampling was
+reported off for two builds while it was still on.
+
+There is no console in the headset to correct one with either, so a stale value
+is not something the player can work around. These become ordinary archived
+cvars once the numbers settle.
+==================
+*/
+static cvar_t *VR_TuningCvar(const char *name, const char *value)
+{
+	cvar_t *cvar = Cvar_Get(name, value, 0);
+
+	Cvar_Set2(name, value, qtrue);
+	return cvar;
+}
+
+/*
+==================
+VR_ExtensionSupported
+
+Whether the runtime offers an instance extension. Everything beyond the two
+required ones is asked for rather than assumed: a runtime that does not have it
+must not be handed the name, or xrCreateInstance fails outright and the game
+loses VR entirely over an optional feature.
+==================
+*/
+static qboolean VR_ExtensionSupported(const char *name)
+{
+	XrExtensionProperties *available;
+	uint32_t               count = 0;
+	uint32_t               i;
+	qboolean               found = qfalse;
+
+	if (!XR_CHECK(xrEnumerateInstanceExtensionProperties(NULL, 0, &count, NULL)) || !count) {
+		Com_Printf("OpenXR: could not enumerate instance extensions\n");
+		return qfalse;
+	}
+
+	available = Z_Malloc(count * sizeof(*available));
+	for (i = 0; i < count; i++) {
+		memset(&available[i], 0, sizeof(available[i]));
+		available[i].type = XR_TYPE_EXTENSION_PROPERTIES;
+	}
+
+	if (XR_CHECK(xrEnumerateInstanceExtensionProperties(NULL, count, &count, available))) {
+		for (i = 0; i < count && !found; i++) {
+			if (!strcmp(available[i].extensionName, name)) {
+				found = qtrue;
+			}
+		}
+	}
+
+	Com_Printf("OpenXR: %s %s among %u instance extensions\n",
+		name, found ? "found" : "NOT found", count);
+
+	// The list itself when the answer is no, because the alternative is
+	// guessing at whether the name is wrong, the runtime is old, or the
+	// enumeration returned nothing useful at all.
+	if (!found) {
+		for (i = 0; i < count; i++) {
+			Com_Printf("OpenXR:   %s\n", available[i].extensionName);
+		}
+	}
+
+	Z_Free(available);
+	return found;
+}
+
+/*
+==================
+VR_ApplyRefreshRate
+
+Quest 3 runs at 72Hz until something asks for more. Picks the fastest mode the
+headset offers that is no faster than vr_refreshRate, so lowering the cvar is a
+way to buy frame budget rather than a way to be ignored.
+==================
+*/
+static void VR_ApplyRefreshRate(void)
+{
+	float    rates[32];
+	uint32_t count = 0;
+	uint32_t i;
+	float    want, best = 0.0f;
+
+	// Every way out of here says so. Silence was indistinguishable from the
+	// call never having happened, which cost a round trip on the device to find
+	// out which.
+	if (!vr.pfnEnumerateRefreshRates || !vr.pfnRequestRefreshRate) {
+		Com_Printf("OpenXR: refresh rate entry points missing\n");
+		return;
+	}
+
+	want = vr.vr_refreshRate ? vr.vr_refreshRate->value : 0.0f;
+
+	// 0 leaves whatever the runtime chose, for telling "the request failed"
+	// apart from "the request was never made" when a frame rate looks wrong.
+	if (want <= 0.0f) {
+		Com_Printf("OpenXR: vr_refreshRate %g, leaving the runtime's choice alone\n", want);
+		return;
+	}
+
+	// Two calls, the way the rest of OpenXR is enumerated: ask how many, then
+	// ask for them. Handing over a buffer and hoping got a count of zero out of
+	// the Oculus runtime.
+	if (!XR_CHECK(vr.pfnEnumerateRefreshRates(vr.session, 0, &count, NULL))) {
+		return;
+	}
+
+	if (!count) {
+		// Not an error and not final: the runtime does not necessarily have
+		// these ready the moment the session begins, so this is retried until it
+		// does. Silent, because otherwise it would say so every frame.
+		return;
+	}
+
+	if (count > ARRAY_LEN(rates)) {
+		count = ARRAY_LEN(rates);
+	}
+
+	if (!XR_CHECK(vr.pfnEnumerateRefreshRates(vr.session, count, &count, rates)) || !count) {
+		return;
+	}
+
+	for (i = 0; i < count; i++) {
+		Com_Printf("OpenXR: display refresh rate available: %.0fHz\n", rates[i]);
+
+		if (rates[i] <= want + 0.5f && rates[i] > best) {
+			best = rates[i];
+		}
+	}
+
+	if (best <= 0.0f) {
+		Com_Printf("OpenXR: no display refresh rate at or below %.0fHz\n", want);
+		return;
+	}
+
+	if (XR_CHECK(vr.pfnRequestRefreshRate(vr.session, best))) {
+		Com_Printf("OpenXR: display refresh rate %.0fHz\n", best);
+	}
+
+	// Either way, stop asking.
+	vr.refreshRateApplied = qtrue;
+}
+
+/*
+==================
 VR_Init
 ==================
 */
 qboolean VR_Init(void)
 {
-	const char *extensions[] = {
-		XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
-		XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
-	};
+	const char *extensions[4];
+	uint32_t    extensionCount = 0;
+	qboolean    wantRefreshRate;
 
 	XrInstanceCreateInfoAndroidKHR androidInfo;
 	XrInstanceCreateInfo           instanceInfo;
@@ -274,10 +536,106 @@ qboolean VR_Init(void)
 	vr.vr_worldscale = Cvar_Get("vr_worldscale", "32", CVAR_ARCHIVE);
 	vr.vr_screenDistance = Cvar_Get("vr_screenDistance", "2.5", CVAR_ARCHIVE);
 	vr.vr_screenSize = Cvar_Get("vr_screenSize", "3.0", CVAR_ARCHIVE);
+	vr.vr_refreshRate = Cvar_Get("vr_refreshRate", "90", CVAR_ARCHIVE);
+	// Off until there is a measured frame budget to spend on it. The mechanism
+	// works - the driver has the extension and the attachments come up complete
+	// - but multisampled render to texture keeps the samples in tile memory,
+	// and anything that unbinds and rebinds the framebuffer mid frame loses
+	// them, so it wants checking against the renderer's passes before it goes
+	// on by default.
+	//
+	// Off until the black patches on the ground are understood - it is the
+	// obvious suspect, since multisampled render to texture keeps its samples in
+	// tile memory and anything that unbinds the framebuffer mid frame loses
+	// them.
+	vr.vr_msaa = VR_TuningCvar("vr_samples", "0");
+	vr.vr_pointerBeam = Cvar_Get("vr_pointerBeam", "1", CVAR_ARCHIVE);
+	vr.vr_wristPanel = VR_TuningCvar("vr_wristPanel", "0");
+	// Big for something worn on the arm, because the panel carries the whole
+	// 1680x1760 screen and the HUD only occupies a small part of it - a compass
+	// a hundred and fifty pixels across is a couple of degrees on a panel this
+	// close, which is legible only in the sense that you can tell it is there.
+	// Scaling the panel scales everything on it and crops nothing.
+	vr.vr_wristSize = VR_TuningCvar("vr_wristSize", "0.26");
+	// Which part of the screen the panel shows, as fractions. The HUD is laid
+	// out for a whole screen and occupies a small share of it, so at full extent
+	// a compass is a couple of degrees across and legible only in the sense that
+	// you can tell it is there. Growing the quad does not help - that is a
+	// bigger panel with the same small compass on it. Showing less of the buffer
+	// is what makes the contents bigger, and the compositor does the crop for
+	// free.
+	//
+	// The top band, full width: the health readout sits at one end of it and the
+	// compass at the other, with the rest of the screen empty. Keeping the whole
+	// width keeps both, and throwing away the empty two thirds below is what
+	// makes them large enough to read - the panel shows less, so what is left is
+	// bigger, without the quad growing in the room.
+	//
+	vr.vr_wristCropX = VR_TuningCvar("vr_wristCropX", "0");
+	vr.vr_wristCropY = VR_TuningCvar("vr_wristCropY", "0");
+	vr.vr_wristCropW = VR_TuningCvar("vr_wristCropW", "1");
+	vr.vr_wristCropH = VR_TuningCvar("vr_wristCropH", "0.34");
+	// Out of the back of the hand, and back along the forearm: the controller's
+	// pose sits out at the fingers, so a panel placed at it would be worn on the
+	// knuckles rather than the wrist. Stood further off now that it is large
+	// enough to otherwise swallow the player's arm.
+	vr.vr_wristDistance = VR_TuningCvar("vr_wristDistance", "0.16");
+	vr.vr_wristBack = VR_TuningCvar("vr_wristBack", "0.07");
 	vr_traceTracking = Cvar_Get("vr_traceTracking", "0", 0);
+	// On by default while the frame budget is still an open question; there is
+	// no console in the headset to turn it on with when it is wanted.
+	vr_traceFrame = Cvar_Get("vr_traceFrame", "1", 0);
+	// Read by the game, which otherwise clamps where the player may look while
+	// they are climbing - see Player::PlayerAngles.
+	Cvar_Set2("vr_freeLook", "1", qtrue);
+
+	//
+	// Strip the renderer back to what a 2002 game actually needs.
+	//
+	// renderergl2 is the rend2 rewrite: every surface goes through a GLSL
+	// program with dozens of uniforms set on it, once per surface per eye. That
+	// is the cost the frame timing found - tens of milliseconds of CPU issuing
+	// draws, while the GPU sat idle finishing in three. None of what it buys is
+	// visible here: this content was authored for a fixed function renderer, so
+	// the normal maps, specular, tone mapping and the rest are being computed
+	// over textures that have nothing for them to read.
+	//
+	// Forced rather than defaulted, because these are archived and a value from
+	// an earlier run would otherwise win - and there is no console in a headset
+	// to correct one with.
+	//
+	{
+		static const char *strip[] = {
+			"r_normalMapping",  "0",
+			"r_specularMapping","0",
+			"r_deluxeMapping",  "0",
+			"r_cubeMapping",    "0",
+			"r_hdr",            "0",
+			"r_toneMap",        "0",
+			"r_ssao",           "0",
+			"r_pbr",            "0",
+			"r_sunlightMode",   "0",
+			"r_depthPrepass",   "0",
+			"r_shadows",        "0",
+			"r_dlightMode",     "0",
+		};
+		int i;
+
+		for (i = 0; i < (int)ARRAY_LEN(strip); i += 2) {
+			Cvar_Set2(strip[i], strip[i + 1], qtrue);
+		}
+	}
 
 	if (!VR_InitLoader()) {
 		return qfalse;
+	}
+
+	extensions[extensionCount++] = XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME;
+	extensions[extensionCount++] = XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME;
+
+	wantRefreshRate = VR_ExtensionSupported(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+	if (wantRefreshRate) {
+		extensions[extensionCount++] = XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
 	}
 
 	memset(&androidInfo, 0, sizeof(androidInfo));
@@ -299,7 +657,7 @@ qboolean VR_Init(void)
 		sizeof(instanceInfo.applicationInfo.applicationName));
 	Q_strncpyz(instanceInfo.applicationInfo.engineName, "OpenMoHAA",
 		sizeof(instanceInfo.applicationInfo.engineName));
-	instanceInfo.enabledExtensionCount = ARRAY_LEN(extensions);
+	instanceInfo.enabledExtensionCount = extensionCount;
 	instanceInfo.enabledExtensionNames = extensions;
 
 	// A missing runtime is not an error: the game should still run flat.
@@ -307,6 +665,13 @@ qboolean VR_Init(void)
 		Com_Printf("OpenXR: no runtime available, running without VR\n");
 		vr.instance = XR_NULL_HANDLE;
 		return qfalse;
+	}
+
+	if (wantRefreshRate) {
+		XR_CHECK(xrGetInstanceProcAddr(vr.instance, "xrEnumerateDisplayRefreshRatesFB",
+			(PFN_xrVoidFunction *)&vr.pfnEnumerateRefreshRates));
+		XR_CHECK(xrGetInstanceProcAddr(vr.instance, "xrRequestDisplayRefreshRateFB",
+			(PFN_xrVoidFunction *)&vr.pfnRequestRefreshRate));
 	}
 
 	memset(&instanceProperties, 0, sizeof(instanceProperties));
@@ -355,6 +720,26 @@ qboolean VR_Init(void)
 
 	vr.eyeWidth  = viewConfigs[0].recommendedImageRectWidth;
 	vr.eyeHeight = viewConfigs[0].recommendedImageRectHeight;
+
+	// Rendering below the runtime's recommendation, which is the one lever that
+	// moves fill rate directly. It is also the measurement that settles whether
+	// fill rate is the problem at all: if the frame time falls roughly with the
+	// pixel count, the GPU is the bottleneck and this is the fix; if it barely
+	// moves, the cost is per draw and lies somewhere else entirely.
+	{
+		cvar_t     *scaleCvar = VR_TuningCvar("vr_resolutionScale", "0.6");
+		const float scale = scaleCvar->value;
+
+		if (scale > 0.1f && scale < 1.0f) {
+			vr.eyeWidth = (uint32_t)(vr.eyeWidth * scale);
+			vr.eyeHeight = (uint32_t)(vr.eyeHeight * scale);
+
+			// Even dimensions: an odd render target is a needless awkwardness
+			// for the compositor's own scaling.
+			vr.eyeWidth &= ~1u;
+			vr.eyeHeight &= ~1u;
+		}
+	}
 
 	Com_Printf("OpenXR: %ux%u per eye\n", vr.eyeWidth, vr.eyeHeight);
 
@@ -413,13 +798,65 @@ static void VR_DestroySwapchain(vrSwapchain_t *swapchain)
 
 /*
 ==================
+VR_InitMultisampling
+
+GL_EXT_multisampled_render_to_texture keeps the multisampled image in tile
+memory and resolves it as the tile is written out, so the extra samples never
+reach main memory and the bandwidth cost - the part that actually hurts on this
+hardware - is close to nothing. The swapchain image itself stays single
+sampled; it is the attachment that carries the sample count.
+==================
+*/
+static void VR_InitMultisampling(void)
+{
+	const char *extensionList = (const char *)glGetString(GL_EXTENSIONS);
+	int         want = vr.vr_msaa ? vr.vr_msaa->integer : 0;
+	GLint       maxSamples = 0;
+
+	vr.samples = 1;
+	vr.glRenderbufferStorageMultisampleEXT = NULL;
+	vr.glFramebufferTexture2DMultisampleEXT = NULL;
+
+	if (want <= 1) {
+		return;
+	}
+
+	if (!extensionList || !strstr(extensionList, "GL_EXT_multisampled_render_to_texture")) {
+		Com_Printf("OpenXR: no GL_EXT_multisampled_render_to_texture, vr_samples ignored\n");
+		return;
+	}
+
+	vr.glRenderbufferStorageMultisampleEXT = (PFNGLRENDERBUFFERSTORAGEMULTISAMPLEEXTPROC)
+		eglGetProcAddress("glRenderbufferStorageMultisampleEXT");
+	vr.glFramebufferTexture2DMultisampleEXT = (PFNGLFRAMEBUFFERTEXTURE2DMULTISAMPLEEXTPROC)
+		eglGetProcAddress("glFramebufferTexture2DMultisampleEXT");
+
+	if (!vr.glRenderbufferStorageMultisampleEXT || !vr.glFramebufferTexture2DMultisampleEXT) {
+		Com_Printf("OpenXR: multisampled render to texture advertised but not resolvable\n");
+		vr.glRenderbufferStorageMultisampleEXT = NULL;
+		vr.glFramebufferTexture2DMultisampleEXT = NULL;
+		return;
+	}
+
+	glGetIntegerv(GL_MAX_SAMPLES_EXT, &maxSamples);
+	if (maxSamples < 2) {
+		return;
+	}
+
+	vr.samples = want > maxSamples ? maxSamples : want;
+	Com_Printf("OpenXR: %dx MSAA, resolved in tile memory\n", vr.samples);
+}
+
+/*
+==================
 VR_CreateSwapchain
 
 One swapchain per eye, each image wrapped in a framebuffer with its own depth
 buffer so the engine can render straight into it.
 ==================
 */
-static qboolean VR_CreateSwapchain(vrSwapchain_t *swapchain, uint32_t width, uint32_t height)
+static qboolean VR_CreateSwapchain(vrSwapchain_t *swapchain, uint32_t width, uint32_t height,
+	int samples)
 {
 	XrSwapchainCreateInfo createInfo;
 	uint32_t i;
@@ -465,14 +902,31 @@ static qboolean VR_CreateSwapchain(vrSwapchain_t *swapchain, uint32_t width, uin
 	glGenRenderbuffers(swapchain->imageCount, swapchain->depthBuffers);
 	glGenFramebuffers(swapchain->imageCount, swapchain->frameBuffers);
 
+	// Both attachments have to carry the same sample count or the framebuffer
+	// is incomplete, so the depth renderbuffer is multisampled alongside the
+	// colour attachment even though nothing ever reads it back.
+	if (samples > 1 && (!vr.glRenderbufferStorageMultisampleEXT || !vr.glFramebufferTexture2DMultisampleEXT)) {
+		samples = 1;
+	}
+
 	for (i = 0; i < swapchain->imageCount; i++) {
 		glBindRenderbuffer(GL_RENDERBUFFER, swapchain->depthBuffers[i]);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, swapchain->width, swapchain->height);
+		if (samples > 1) {
+			vr.glRenderbufferStorageMultisampleEXT(GL_RENDERBUFFER, samples, GL_DEPTH24_STENCIL8,
+				swapchain->width, swapchain->height);
+		} else {
+			glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, swapchain->width, swapchain->height);
+		}
 		glBindRenderbuffer(GL_RENDERBUFFER, 0);
 
 		glBindFramebuffer(GL_FRAMEBUFFER, swapchain->frameBuffers[i]);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-			swapchain->images[i].image, 0);
+		if (samples > 1) {
+			vr.glFramebufferTexture2DMultisampleEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+				swapchain->images[i].image, 0, samples);
+		} else {
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+				swapchain->images[i].image, 0);
+		}
 		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
 			swapchain->depthBuffers[i]);
 
@@ -564,15 +1018,44 @@ void VR_CreateSession(void)
 	spaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
 	XR_CHECK(xrCreateReferenceSpace(vr.session, &spaceInfo, &vr.viewSpace));
 
-	for (i = 0; i < VR_MAX_EYES; i++) {
-		if (!VR_CreateSwapchain(&vr.swapchains[i], vr.eyeWidth, vr.eyeHeight)) {
-			Com_Printf("OpenXR: failed to create the swapchain for eye %d\n", i);
+	VR_InitMultisampling();
+
+	// Two attempts: a driver that advertises the extension can still refuse the
+	// combination of formats, and losing VR over an image quality setting would
+	// be a poor trade. Both eyes are rebuilt together so they cannot end up with
+	// different sample counts.
+	for (;;) {
+		qboolean ok = qtrue;
+
+		for (i = 0; i < VR_MAX_EYES; i++) {
+			if (!VR_CreateSwapchain(&vr.swapchains[i], vr.eyeWidth, vr.eyeHeight, vr.samples)) {
+				ok = qfalse;
+				break;
+			}
+		}
+
+		if (ok) {
+			break;
+		}
+
+		for (i = 0; i < VR_MAX_EYES; i++) {
+			VR_DestroySwapchain(&vr.swapchains[i]);
+		}
+
+		if (vr.samples <= 1) {
+			Com_Printf("OpenXR: failed to create the eye swapchains\n");
 			VR_DestroySession();
 			return;
 		}
+
+		Com_Printf("OpenXR: %dx MSAA eye framebuffer incomplete, falling back to 1x\n", vr.samples);
+		vr.samples = 1;
 	}
 
-	if (!VR_CreateSwapchain(&vr.uiSwapchain, vr.eyeWidth, vr.eyeHeight)) {
+	// Single sampled deliberately: the panel is a blit target for a buffer the
+	// 2D path already drew, so there are no edges here for extra samples to
+	// find.
+	if (!VR_CreateSwapchain(&vr.uiSwapchain, vr.eyeWidth, vr.eyeHeight, 1)) {
 		Com_Printf("OpenXR: failed to create the screen layer swapchain\n");
 		VR_DestroySession();
 		return;
@@ -594,6 +1077,7 @@ void VR_CreateSession(void)
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	VR_CreateActions();
+	VR_CreateBeam();
 
 	Com_Printf("OpenXR: session created (%u images per eye)\n", vr.swapchains[0].imageCount);
 }
@@ -613,7 +1097,7 @@ static void VR_CreateActions(void)
 	XrActionCreateInfo            actionInfo;
 	XrActionSpaceCreateInfo       spaceInfo;
 	XrSessionActionSetsAttachInfo attachInfo;
-	XrActionSuggestedBinding      bindings[8];
+	XrActionSuggestedBinding      bindings[16];
 	XrInteractionProfileSuggestedBinding suggested;
 	XrPath                        profile;
 	int                           i;
@@ -678,6 +1162,35 @@ static void VR_CreateActions(void)
 		return;
 	}
 
+	actionInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+	Q_strncpyz(actionInfo.actionName, "objectives", sizeof(actionInfo.actionName));
+	Q_strncpyz(actionInfo.localizedActionName, "Objectives", sizeof(actionInfo.localizedActionName));
+
+	if (!XR_CHECK(xrCreateAction(vr.actionSet, &actionInfo, &vr.objectivesAction))) {
+		return;
+	}
+
+	Q_strncpyz(actionInfo.actionName, "jump", sizeof(actionInfo.actionName));
+	Q_strncpyz(actionInfo.localizedActionName, "Jump", sizeof(actionInfo.localizedActionName));
+
+	if (!XR_CHECK(xrCreateAction(vr.actionSet, &actionInfo, &vr.jumpAction))) {
+		return;
+	}
+
+	Q_strncpyz(actionInfo.actionName, "duck", sizeof(actionInfo.actionName));
+	Q_strncpyz(actionInfo.localizedActionName, "Duck", sizeof(actionInfo.localizedActionName));
+
+	if (!XR_CHECK(xrCreateAction(vr.actionSet, &actionInfo, &vr.duckAction))) {
+		return;
+	}
+
+	Q_strncpyz(actionInfo.actionName, "use", sizeof(actionInfo.actionName));
+	Q_strncpyz(actionInfo.localizedActionName, "Use", sizeof(actionInfo.localizedActionName));
+
+	if (!XR_CHECK(xrCreateAction(vr.actionSet, &actionInfo, &vr.useAction))) {
+		return;
+	}
+
 	for (i = 0; i < (int)ARRAY_LEN(profiles); i++) {
 		const char *hands[2] = { "left", "right" };
 		uint32_t    count = 0;
@@ -698,12 +1211,48 @@ static void VR_CreateActions(void)
 				count++;
 			}
 
-			// Thumbsticks only exist on the Touch profile; the simple
-			// controller has none, and a binding it does not know would have
-			// the runtime reject the whole set.
+			// Thumbsticks and face buttons only exist on the Touch profile; the
+			// simple controller has neither, and a binding it does not know
+			// would have the runtime reject the whole set.
 			if (i == 0) {
 				Com_sprintf(path, sizeof(path), "/user/hand/%s/input/thumbstick", hands[hand]);
 				bindings[count].action = (hand == 0) ? vr.moveAction : vr.turnAction;
+				if (XR_SUCCEEDED(xrStringToPath(vr.instance, path, &bindings[count].binding))) {
+					count++;
+				}
+
+				// The upper face button on either hand: Y on the left, B on the
+				// right. Both, because which hand is free depends on which one
+				// the player is wearing the panel on.
+				Com_sprintf(path, sizeof(path), "/user/hand/%s/input/%s/click",
+					hands[hand], (hand == 0) ? "y" : "b");
+				bindings[count].action = vr.objectivesAction;
+				if (XR_SUCCEEDED(xrStringToPath(vr.instance, path, &bindings[count].binding))) {
+					count++;
+				}
+
+				// And the lower one for jump: X on the left, A on the right.
+				Com_sprintf(path, sizeof(path), "/user/hand/%s/input/%s/click",
+					hands[hand], (hand == 0) ? "x" : "a");
+				bindings[count].action = vr.jumpAction;
+				if (XR_SUCCEEDED(xrStringToPath(vr.instance, path, &bindings[count].binding))) {
+					count++;
+				}
+
+				// Duck goes on the left stick, since the four face buttons are
+				// spoken for and pressing the stick down to crouch is at least a
+				// gesture in the right direction. Use goes on the right one:
+				// opening doors belongs with the hand that holds the weapon.
+				Com_sprintf(path, sizeof(path), "/user/hand/%s/input/thumbstick/click", hands[hand]);
+				bindings[count].action = (hand == 0) ? vr.duckAction : vr.useAction;
+				if (XR_SUCCEEDED(xrStringToPath(vr.instance, path, &bindings[count].binding))) {
+					count++;
+				}
+
+				// And on the grips as well, both of them, because reaching for a
+				// door handle with the grip is the thing people try first.
+				Com_sprintf(path, sizeof(path), "/user/hand/%s/input/squeeze/value", hands[hand]);
+				bindings[count].action = vr.useAction;
 				if (XR_SUCCEEDED(xrStringToPath(vr.instance, path, &bindings[count].binding))) {
 					count++;
 				}
@@ -775,14 +1324,19 @@ static void VR_RotateVector(const XrQuaternionf *q, const XrVector3f *in, XrVect
 
 /*
 ==================
-VR_PointAtScreen
+VR_PointAtPanel
 
-Casts the hand's aim ray at the panel and, if it lands on it, moves the
-engine's cursor to the same spot. The engine then draws its own cursor there,
-so the menus behave as they always did.
+Casts the hand's aim ray at a panel and, if it lands on it, moves the engine's
+cursor to the same spot. The engine then draws its own cursor there, so the
+menus behave as they always did.
+
+Takes the panel rather than assuming one, because there are two: the big one
+fixed in the room while the world is not being drawn, and the small one on the
+player's wrist while it is.
 ==================
 */
-static qboolean VR_PointAtScreen(const XrPosef *aim)
+static qboolean VR_PointAtPanel(const XrPosef *aim, const XrPosef *panel, float size,
+	float cropX, float cropY, float cropWidth, float cropHeight)
 {
 	XrVector3f  forward  = { 0.0f, 0.0f, -1.0f };
 	XrVector3f  rightAxis = { 1.0f, 0.0f, 0.0f };
@@ -791,19 +1345,16 @@ static qboolean VR_PointAtScreen(const XrPosef *aim)
 	XrVector3f  dir, right, up, normal, toPlane, hit;
 	float       denom, distance, localX, localY;
 	float       halfWidth, halfHeight;
-	const float size = vr.vr_screenSize->value > 0.0f ? vr.vr_screenSize->value : 3.0f;
-
-	if (!vr.screenAnchorValid) {
-		return qfalse;
-	}
 
 	halfWidth = size * 0.5f;
-	halfHeight = halfWidth * (float)vr.uiSwapchain.height / (float)vr.uiSwapchain.width;
+	halfHeight = halfWidth
+		* (cropHeight * (float)vr.uiSwapchain.height)
+		/ (cropWidth * (float)vr.uiSwapchain.width);
 
 	VR_RotateVector(&aim->orientation, &forward, &dir);
-	VR_RotateVector(&vr.screenAnchor.orientation, &rightAxis, &right);
-	VR_RotateVector(&vr.screenAnchor.orientation, &upAxis, &up);
-	VR_RotateVector(&vr.screenAnchor.orientation, &normalAxis, &normal);
+	VR_RotateVector(&panel->orientation, &rightAxis, &right);
+	VR_RotateVector(&panel->orientation, &upAxis, &up);
+	VR_RotateVector(&panel->orientation, &normalAxis, &normal);
 
 	denom = dir.x * normal.x + dir.y * normal.y + dir.z * normal.z;
 
@@ -812,9 +1363,9 @@ static qboolean VR_PointAtScreen(const XrPosef *aim)
 		return qfalse;
 	}
 
-	toPlane.x = vr.screenAnchor.position.x - aim->position.x;
-	toPlane.y = vr.screenAnchor.position.y - aim->position.y;
-	toPlane.z = vr.screenAnchor.position.z - aim->position.z;
+	toPlane.x = panel->position.x - aim->position.x;
+	toPlane.y = panel->position.y - aim->position.y;
+	toPlane.z = panel->position.z - aim->position.z;
 
 	distance = (toPlane.x * normal.x + toPlane.y * normal.y + toPlane.z * normal.z) / denom;
 
@@ -822,9 +1373,9 @@ static qboolean VR_PointAtScreen(const XrPosef *aim)
 		return qfalse;
 	}
 
-	hit.x = aim->position.x + dir.x * distance - vr.screenAnchor.position.x;
-	hit.y = aim->position.y + dir.y * distance - vr.screenAnchor.position.y;
-	hit.z = aim->position.z + dir.z * distance - vr.screenAnchor.position.z;
+	hit.x = aim->position.x + dir.x * distance - panel->position.x;
+	hit.y = aim->position.y + dir.y * distance - panel->position.y;
+	hit.z = aim->position.z + dir.z * distance - panel->position.z;
 
 	localX = hit.x * right.x + hit.y * right.y + hit.z * right.z;
 	localY = hit.x * up.x + hit.y * up.y + hit.z * up.z;
@@ -834,12 +1385,272 @@ static qboolean VR_PointAtScreen(const XrPosef *aim)
 	}
 
 	// Panel space is centred and Y up; the engine's screen is corner based and
-	// Y down.
+	// Y down. The crop sits between the two: what the player sees is a window
+	// onto the screen, so a hit halfway across the panel is halfway across the
+	// window, not halfway across the screen.
 	CL_SetMousePos(
-		(int)((localX / halfWidth * 0.5f + 0.5f) * cls.glconfig.vidWidth),
-		(int)((0.5f - localY / halfHeight * 0.5f) * cls.glconfig.vidHeight));
+		(int)((cropX + (localX / halfWidth * 0.5f + 0.5f) * cropWidth) * cls.glconfig.vidWidth),
+		(int)((cropY + (0.5f - localY / halfHeight * 0.5f) * cropHeight) * cls.glconfig.vidHeight));
+
+	// How far the beam has to travel to reach what it is pointing at.
+	vr.pointerDistance = distance;
 
 	return qtrue;
+}
+
+/*
+==================
+VR_WristCrop
+
+The part of the screen the wrist quad shows, as fractions with the origin at the
+top left - the same way round as the engine's own screen coordinates, so the
+numbers mean what they look like they mean.
+
+Kept in one place because three things have to agree about it: the shader that
+samples it, the quad's aspect ratio, and the ray that puts the cursor on it.
+==================
+*/
+static void VR_WristCrop(float *x, float *y, float *width, float *height)
+{
+	float cx = vr.vr_wristCropX->value;
+	float cy = vr.vr_wristCropY->value;
+	float cw = vr.vr_wristCropW->value;
+	float ch = vr.vr_wristCropH->value;
+
+	if (cw <= 0.0f || cw > 1.0f) {
+		cw = 1.0f;
+	}
+	if (ch <= 0.0f || ch > 1.0f) {
+		ch = 1.0f;
+	}
+
+	// Clamped so a crop cannot be asked to run off the edge of the buffer, which
+	// the runtime treats as a hard error rather than something to tidy up.
+	if (cx < 0.0f) {
+		cx = 0.0f;
+	} else if (cx > 1.0f - cw) {
+		cx = 1.0f - cw;
+	}
+	if (cy < 0.0f) {
+		cy = 0.0f;
+	} else if (cy > 1.0f - ch) {
+		cy = 1.0f - ch;
+	}
+
+	*x = cx;
+	*y = cy;
+	*width = cw;
+	*height = ch;
+}
+
+/*
+==================
+VR_QuatFromAxes
+
+A quaternion from three orthonormal axes, given as the columns of the rotation.
+==================
+*/
+static void VR_QuatFromAxes(const XrVector3f *x, const XrVector3f *y, const XrVector3f *z,
+	XrQuaternionf *q)
+{
+	const float trace = x->x + y->y + z->z;
+
+	if (trace > 0.0f) {
+		const float s = sqrtf(trace + 1.0f) * 2.0f;
+
+		q->w = 0.25f * s;
+		q->x = (y->z - z->y) / s;
+		q->y = (z->x - x->z) / s;
+		q->z = (x->y - y->x) / s;
+	} else if (x->x > y->y && x->x > z->z) {
+		const float s = sqrtf(1.0f + x->x - y->y - z->z) * 2.0f;
+
+		q->w = (y->z - z->y) / s;
+		q->x = 0.25f * s;
+		q->y = (y->x + x->y) / s;
+		q->z = (z->x + x->z) / s;
+	} else if (y->y > z->z) {
+		const float s = sqrtf(1.0f + y->y - x->x - z->z) * 2.0f;
+
+		q->w = (z->x - x->z) / s;
+		q->x = (y->x + x->y) / s;
+		q->y = 0.25f * s;
+		q->z = (z->y + y->z) / s;
+	} else {
+		const float s = sqrtf(1.0f + z->z - x->x - y->y) * 2.0f;
+
+		q->w = (x->y - y->x) / s;
+		q->x = (z->x + x->z) / s;
+		q->y = (z->y + y->z) / s;
+		q->z = 0.25f * s;
+	}
+}
+
+/*
+==================
+VR_UpdateWristPanel
+
+Raise the off hand and turn it towards your face and the panel appears on it,
+the way a watch is read. No button spent on it, and it is the gesture people try
+first.
+
+The thresholds are deliberately different going in and coming out. A single
+threshold sits exactly where the hand rests while being read, so the panel
+strobes on and off at the very moment it is being looked at.
+==================
+*/
+static void VR_UpdateWristPanel(void)
+{
+	static const XrVector3f localUp = { 0.0f, 1.0f, 0.0f };
+	static const XrVector3f localForward = { 0.0f, 0.0f, -1.0f };
+	XrVector3f              head, toHead, handUp, handForward;
+	XrVector3f              axisX, axisY, axisZ;
+	float                   distance, facing, length;
+	float                   offset, back;
+
+	if (!vr.handPoseValid[0] || !vr.viewsValid
+		|| (vr.vr_wristPanel && !vr.vr_wristPanel->integer)) {
+		vr.wristVisible = qfalse;
+		return;
+	}
+
+	head.x = (vr.views[0].pose.position.x + vr.views[1].pose.position.x) * 0.5f;
+	head.y = (vr.views[0].pose.position.y + vr.views[1].pose.position.y) * 0.5f;
+	head.z = (vr.views[0].pose.position.z + vr.views[1].pose.position.z) * 0.5f;
+
+	toHead.x = head.x - vr.handPoses[0].position.x;
+	toHead.y = head.y - vr.handPoses[0].position.y;
+	toHead.z = head.z - vr.handPoses[0].position.z;
+
+	distance = sqrtf(toHead.x * toHead.x + toHead.y * toHead.y + toHead.z * toHead.z);
+
+	if (distance < 0.0001f) {
+		vr.wristVisible = qfalse;
+		return;
+	}
+
+	toHead.x /= distance;
+	toHead.y /= distance;
+	toHead.z /= distance;
+
+	// Which way the back of the hand is pointing. Turning the wrist over to
+	// read it swings this towards the face.
+	VR_RotateVector(&vr.handPoses[0].orientation, &localUp, &handUp);
+
+	facing = handUp.x * toHead.x + handUp.y * toHead.y + handUp.z * toHead.z;
+
+	if (vr.wristVisible) {
+		vr.wristVisible = (distance < 0.85f && facing > 0.20f) ? qtrue : qfalse;
+	} else {
+		vr.wristVisible = (distance < 0.65f && facing > 0.50f) ? qtrue : qfalse;
+	}
+
+	if (!vr.wristVisible) {
+		return;
+	}
+
+	// Worn, not floating: the panel is strapped to the back of the hand and goes
+	// wherever the hand goes, so turning the wrist turns it. Facing the eye
+	// instead would read as a thing hovering near the arm rather than a thing on
+	// it, and it would slide about whenever the head moved.
+	//
+	// Out of the back of the hand is the way the panel faces; along the fingers
+	// is its up. Both come straight off the controller pose.
+	VR_RotateVector(&vr.handPoses[0].orientation, &localForward, &handForward);
+
+	axisZ = handUp;
+	axisY = handForward;
+
+	// X from the other two, then Y rebuilt from X and Z, so the three are
+	// square even if the pose's own axes are not quite.
+	axisX.x = axisY.y * axisZ.z - axisY.z * axisZ.y;
+	axisX.y = axisY.z * axisZ.x - axisY.x * axisZ.z;
+	axisX.z = axisY.x * axisZ.y - axisY.y * axisZ.x;
+
+	length = sqrtf(axisX.x * axisX.x + axisX.y * axisX.y + axisX.z * axisX.z);
+
+	if (length < 0.0001f) {
+		vr.wristVisible = qfalse;
+		return;
+	}
+
+	axisX.x /= length;
+	axisX.y /= length;
+	axisX.z /= length;
+
+	axisY.x = axisZ.y * axisX.z - axisZ.z * axisX.y;
+	axisY.y = axisZ.z * axisX.x - axisZ.x * axisX.z;
+	axisY.z = axisZ.x * axisX.y - axisZ.y * axisX.x;
+
+	// Stood off the back of the hand, and back along the forearm towards where a
+	// watch would actually sit - the controller pose is out at the fingers.
+	offset = vr.vr_wristDistance->value;
+	back = vr.vr_wristBack->value;
+
+	vr.wristPose.position.x = vr.handPoses[0].position.x + handUp.x * offset - handForward.x * back;
+	vr.wristPose.position.y = vr.handPoses[0].position.y + handUp.y * offset - handForward.y * back;
+	vr.wristPose.position.z = vr.handPoses[0].position.z + handUp.z * offset - handForward.z * back;
+
+	VR_QuatFromAxes(&axisX, &axisY, &axisZ, &vr.wristPose.orientation);
+}
+
+/*
+==================
+VR_WristPanelVisible
+==================
+*/
+qboolean VR_WristPanelVisible(void)
+{
+	return vr.wristVisible;
+}
+
+/*
+==================
+VR_WristPanelEnabled
+
+Whether the HUD goes on the wrist at all. Off by default: the HUD is drawn in
+the eye buffers instead, converged and pulled in from the edges - see
+RB_SetGL2D. That keeps it always readable without a gesture, at the size it was
+designed to be, rather than a slice of a screen shown on a small quad.
+==================
+*/
+qboolean VR_WristPanelEnabled(void)
+{
+	return (vr.vr_wristPanel && vr.vr_wristPanel->integer) ? qtrue : qfalse;
+}
+
+/*
+==================
+VR_UpdateHeldButton
+
+Turns a button into a held console command, sending both edges. The commands
+these drive are all of the "while this is down" kind, so a toggle would leave
+the game holding a key the player has let go of.
+==================
+*/
+static void VR_UpdateHeldButton(XrAction action, qboolean *wasDown,
+	const char *press, const char *release)
+{
+	XrActionStateGetInfo getInfo;
+	XrActionStateBoolean state;
+	qboolean             down = qfalse;
+
+	memset(&getInfo, 0, sizeof(getInfo));
+	getInfo.type = XR_TYPE_ACTION_STATE_GET_INFO;
+	getInfo.action = action;
+
+	memset(&state, 0, sizeof(state));
+	state.type = XR_TYPE_ACTION_STATE_BOOLEAN;
+
+	if (XR_SUCCEEDED(xrGetActionStateBoolean(vr.session, &getInfo, &state))
+		&& state.isActive && state.currentState) {
+		down = qtrue;
+	}
+
+	if (down != *wasDown) {
+		Cbuf_AddText(down ? press : release);
+		*wasDown = down;
+	}
 }
 
 /*
@@ -875,25 +1686,68 @@ void VR_UpdateInput(void)
 		return;
 	}
 
-	// Whichever hand is pointing at the panel drives the cursor, so it does not
-	// matter which one the player picks up. The last hand to be on target wins,
-	// which keeps it steady when both are pointing.
-	for (hand = 0; hand < 2 && !onScreen; hand++) {
-		int which = (vr.pointerHand + hand) & 1;
+	// Where each hand is, kept for the beam as well as the cursor. Both are
+	// located every frame rather than stopping at the first hit, so the hand
+	// that is not pointing at the panel still has something to draw.
+	vr.handPoseValid[0] = vr.handPoseValid[1] = qfalse;
+	vr.pointerDistance = 0.0f;
 
+	for (hand = 0; hand < 2; hand++) {
 		memset(&location, 0, sizeof(location));
 		location.type = XR_TYPE_SPACE_LOCATION;
 
-		if (!XR_SUCCEEDED(xrLocateSpace(vr.aimSpaces[which], vr.stageSpace,
+		if (!XR_SUCCEEDED(xrLocateSpace(vr.aimSpaces[hand], vr.stageSpace,
 				vr.frameState.predictedDisplayTime, &location))
 			|| !(location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
 			|| !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
 			continue;
 		}
 
-		if (VR_UseScreenLayer() && VR_PointAtScreen(&location.pose)) {
-			vr.pointerHand = which;
-			onScreen = qtrue;
+		vr.handPoses[hand] = location.pose;
+		vr.handPoseValid[hand] = qtrue;
+	}
+
+	// Whether the player is reading their wrist, which decides both what the
+	// pointer aims at and whether there is a beam to see.
+	VR_UpdateWristPanel();
+
+	// Whichever hand is pointing at the panel drives the cursor, so it does not
+	// matter which one the player picks up. The hand that had it keeps it while
+	// it is still on target, which stops the cursor jumping when both point.
+	//
+	// Which panel depends on what is up: the big one in the room when the world
+	// is not being drawn, the one on the wrist when it is. Never both.
+	for (hand = 0; hand < 2 && !onScreen; hand++) {
+		int which = (vr.pointerHand + hand) & 1;
+
+		if (!vr.handPoseValid[which]) {
+			continue;
+		}
+
+		if (VR_UseScreenLayer()) {
+			const float size = vr.vr_screenSize->value > 0.0f ? vr.vr_screenSize->value : 3.0f;
+
+			// The room sized panel shows the whole screen, uncropped.
+			if (vr.screenAnchorValid
+				&& VR_PointAtPanel(&vr.handPoses[which], &vr.screenAnchor, size,
+					0.0f, 0.0f, 1.0f, 1.0f)) {
+				vr.pointerHand = which;
+				onScreen = qtrue;
+			}
+		} else if (vr.wristVisible) {
+			const float size = vr.vr_wristSize->value > 0.0f ? vr.vr_wristSize->value : 0.26f;
+			float       cropX, cropY, cropWidth, cropHeight;
+
+			VR_WristCrop(&cropX, &cropY, &cropWidth, &cropHeight);
+
+			// Not the hand wearing it: pointing a controller at itself is not a
+			// gesture anyone can make.
+			if (which != 0
+				&& VR_PointAtPanel(&vr.handPoses[which], &vr.wristPose, size,
+					cropX, cropY, cropWidth, cropHeight)) {
+				vr.pointerHand = which;
+				onScreen = qtrue;
+			}
 		}
 	}
 
@@ -918,6 +1772,14 @@ void VR_UpdateInput(void)
 		Com_QueueEvent(0, SE_KEY, K_MOUSE1, selectDown, 0, NULL);
 		vr.selectWasDown = selectDown;
 	}
+
+	// Objectives and jump. Both are held commands - the objectives list fades in
+	// while the key is down, and a jump is a held +moveup the same as it is on a
+	// keyboard - so each button sends both edges rather than toggling.
+	VR_UpdateHeldButton(vr.objectivesAction, &vr.objectivesWasDown, "+scores\n", "-scores\n");
+	VR_UpdateHeldButton(vr.jumpAction, &vr.jumpWasDown, "+moveup\n", "-moveup\n");
+	VR_UpdateHeldButton(vr.duckAction, &vr.duckWasDown, "+movedown\n", "-movedown\n");
+	VR_UpdateHeldButton(vr.useAction, &vr.useWasDown, "+use\n", "-use\n");
 }
 
 /*
@@ -991,7 +1853,35 @@ qboolean VR_GetInput(vrInput_t *input)
 	getInfo.action = vr.turnAction;
 
 	if (XR_SUCCEEDED(xrGetActionStateVector2f(vr.session, &getInfo, &stick)) && stick.isActive) {
-		input->turn = stick.currentState.x;
+		// Sideways only. Pushing this stick up or down is how the player reaches
+		// for whatever else ends up on it, and no thumb makes that movement
+		// without carrying some sideways component along with it - easily enough
+		// to snap the view a step round if it is taken at face value.
+		if (fabsf(stick.currentState.x) > fabsf(stick.currentState.y)) {
+			input->turn = stick.currentState.x;
+		}
+	}
+
+	// Room scale. The headset's own movement is handed to the game as movement
+	// input, not just left as a camera offset: an offset moves the view and
+	// leaves the character standing where it was, so leaning through a wall
+	// works and walking anywhere does not. What the player does with their feet
+	// has to reach the same pmove that the stick does.
+	{
+		vec3_t delta;
+
+		if (vr.stepValid) {
+			VectorSubtract(vr.eyeViews[0].origin, vr.lastHeadOrigin, delta);
+		} else {
+			VectorClear(delta);
+			vr.stepValid = qtrue;
+		}
+
+		VectorCopy(vr.eyeViews[0].origin, vr.lastHeadOrigin);
+
+		input->stepForward = delta[0];
+		// The engine's second axis points left, the usercmd's rightmove right.
+		input->stepRight = -delta[1];
 	}
 
 	// The eye views already carry the recentred orientation, so read the
@@ -1022,10 +1912,11 @@ qboolean VR_GetInput(vrInput_t *input)
 
 			if (hand == 0) {
 				input->offhandYaw = handAngles[YAW];
+				input->offhandTracked = qtrue;
 			} else {
 				input->weaponYaw = handAngles[YAW];
 				input->weaponPitch = handAngles[PITCH];
-				input->handsTracked = qtrue;
+				input->weaponTracked = qtrue;
 			}
 		}
 	}
@@ -1052,6 +1943,7 @@ void VR_DestroySession(void)
 	}
 
 	VR_DestroySwapchain(&vr.uiSwapchain);
+	VR_DestroyBeam();
 
 	if (vr.uiFramebuffer) {
 		glDeleteFramebuffers(1, &vr.uiFramebuffer);
@@ -1131,6 +2023,7 @@ static void VR_HandleSessionStateChange(XrSessionState state)
 
 		if (XR_CHECK(xrBeginSession(vr.session, &beginInfo))) {
 			vr.sessionRunning = qtrue;
+			vr.refreshRateApplied = qfalse;
 			Com_Printf("OpenXR: session running\n");
 		}
 		break;
@@ -1298,14 +2191,31 @@ qboolean VR_BeginFrame(void)
 		return qfalse;
 	}
 
+	// Not at xrBeginSession, which is the obvious place and the wrong one: the
+	// Oculus runtime reports no rates at all that early. Retried from the frame
+	// loop until it has some, then never again.
+	if (!vr.refreshRateApplied) {
+		VR_ApplyRefreshRate();
+	}
+
 	memset(&waitInfo, 0, sizeof(waitInfo));
 	waitInfo.type = XR_TYPE_FRAME_WAIT_INFO;
 
 	memset(&vr.frameState, 0, sizeof(vr.frameState));
 	vr.frameState.type = XR_TYPE_FRAME_STATE;
 
-	if (!XR_CHECK(xrWaitFrame(vr.session, &waitInfo, &vr.frameState))) {
-		return qfalse;
+	{
+		const int before = Sys_Milliseconds();
+		const qboolean ok = XR_CHECK(xrWaitFrame(vr.session, &waitInfo, &vr.frameState));
+
+		// Time spent here is the runtime pacing us, not work: it blocks until
+		// the right moment to start the frame. It only grows when we are early,
+		// so it should be near zero on anything that is running behind.
+		vr.phaseWait += Sys_Milliseconds() - before;
+
+		if (!ok) {
+			return qfalse;
+		}
 	}
 
 	memset(&beginInfo, 0, sizeof(beginInfo));
@@ -1377,6 +2287,10 @@ qboolean VR_BeginFrame(void)
 
 	VR_UpdateInput();
 
+	// Once for the frame, not once per target: the same hands are drawn into
+	// both eyes, and on a menu frame into both eye images again.
+	vr.beamVertexCount = VR_BuildBeamGeometry(vr.beamVerts, ARRAY_LEN(vr.beamVerts) / 3);
+
 	return vr.frameState.shouldRender ? qtrue : qfalse;
 }
 
@@ -1427,10 +2341,23 @@ void VR_PrepareEye(int eye)
 	}
 
 	swapchain->acquired = qtrue;
+	vr.eyeStart = Sys_Milliseconds();
 
-	// Bind it here rather than leaving it to the renderer: the renderer only
-	// binds framebuffers when its own framebuffer support is enabled, and the
-	// eye target has to be current either way.
+	// Tell the renderer before touching GL here, not after.
+	//
+	// The renderer may be holding geometry it has not issued yet - gl4es
+	// batches and flushes lazily - and it only learns to flush when something
+	// it knows about changes the target. Moving the binding underneath it
+	// first would leave that batch to arrive in whatever was bound next, which
+	// is the previous eye's contents appearing in this one.
+	if (re.SetDefaultFramebuffer) {
+		re.SetDefaultFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
+	}
+
+	// Bound again directly because the renderer only binds framebuffers when
+	// its own framebuffer support is enabled, and the eye target has to be
+	// current either way. Same target, so this is a no-op where the call above
+	// did the work.
 	glBindFramebuffer(GL_FRAMEBUFFER, swapchain->frameBuffers[swapchain->acquiredIndex]);
 	glViewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
 	glScissor(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
@@ -1438,18 +2365,119 @@ void VR_PrepareEye(int eye)
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
-	// From here the renderer's idea of "the screen" is this eye's image.
-	if (re.SetDefaultFramebuffer) {
-		re.SetDefaultFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
-	}
-
 	// ...and its camera is this eye.
 	if (re.SetVRView) {
 		const vrEyeView_t *view = &vr.eyeViews[eye];
 
 		re.SetVRView(view->origin, view->axis,
-			view->tanLeft, view->tanRight, view->tanUp, view->tanDown);
+			view->tanLeft, view->tanRight, view->tanUp, view->tanDown,
+			vr.baseYaw, eye);
 	}
+}
+
+/*
+==================
+VR_SetBaseYaw
+==================
+*/
+void VR_SetBaseYaw(float yaw)
+{
+	vr.baseYaw = yaw;
+}
+
+/*
+==================
+VR_TraceRenderTimes
+
+The renderer's own accounting, added to the frame report.
+
+Front end is the scene being built: culling, sorting, animation, all on the CPU.
+Back end is that list being issued. Note that the back end number is still CPU
+time - it is time spent inside GL calls - so a GPU that cannot keep up shows up
+here too, as the driver blocking on a full queue rather than as work.
+==================
+*/
+void VR_TraceRenderTimes(int frontEndMsec, int backEndMsec)
+{
+	vr.phaseFrontEnd += frontEndMsec;
+	vr.phaseBackEnd += backEndMsec;
+}
+
+/*
+==================
+VR_TraceSceneTimes
+
+Wall clock either side of the renderer's own accounting.
+
+"scene" is the whole game frame - snapshots, prediction, entities, marks, temp
+models, effects - of which the renderer's front end is only the last part. It is
+also the part that runs once per eye, so anything expensive in it is being paid
+for twice.
+==================
+*/
+void VR_TraceSceneTimes(int sceneMsec, int issueMsec)
+{
+	vr.phaseScene += sceneMsec;
+	vr.phaseIssue += issueMsec;
+}
+
+/*
+==================
+VR_TraceViewTimes
+==================
+*/
+void VR_TraceViewTimes(int worldMsec, int hudMsec)
+{
+	vr.phaseWorld += worldMsec;
+	vr.phaseHud += hudMsec;
+}
+
+/*
+==================
+VR_TraceHudTimes
+==================
+*/
+void VR_TraceHudTimes(int cgameMsec)
+{
+	vr.phaseCgameHud += cgameMsec;
+}
+
+/*
+==================
+VR_TraceEvent
+==================
+*/
+void VR_TraceEvent(int which)
+{
+	if (which >= 0 && which < VRTRACE_COUNT) {
+		vr.traceEvents[which]++;
+	}
+}
+
+/*
+==================
+VR_TraceState
+==================
+*/
+void VR_TraceHudParts(int setup, int fades, int prints, int overlays, int tail)
+{
+	vr.hudSetup += setup;
+	vr.hudFades += fades;
+	vr.hudPrints += prints;
+	vr.hudOverlays += overlays;
+	vr.hudTail += tail;
+}
+
+/*
+==================
+VR_TraceState
+==================
+*/
+void VR_TraceState(int drawMode, int hudPass, int noMenus)
+{
+	vr.traceDrawMode = drawMode;
+	vr.traceHudPass = hudPass;
+	vr.traceNoMenus = noMenus;
 }
 
 /*
@@ -1472,25 +2500,53 @@ void VR_FinishEye(int eye)
 		return;
 	}
 
-	// The compositor reads the alpha channel; the engine leaves it at whatever
-	// the scene wrote, which shows up as a translucent image.
+	// Again before the direct calls below, and for the same reason as in
+	// VR_PrepareEye: this is the point the renderer's own pending work has to
+	// land in this eye rather than in whatever is bound after it.
+	if (re.SetDefaultFramebuffer) {
+		re.SetDefaultFramebuffer(swapchain->frameBuffers[swapchain->acquiredIndex]);
+	}
+
 	glBindFramebuffer(GL_FRAMEBUFFER, swapchain->frameBuffers[swapchain->acquiredIndex]);
 	glDisable(GL_SCISSOR_TEST);
+
+	// Hands and the pointer beam go in on top of the world, but only while the
+	// wrist panel is up. A beam hanging off the hand at all times would be in
+	// the way of a game that is mostly about looking at things and shooting
+	// them; it is there to point at the panel, so it appears with the panel.
+	if (vr.wristVisible && vr.beamReady && vr.beamVertexCount
+		&& !(vr.vr_pointerBeam && !vr.vr_pointerBeam->integer)) {
+		glViewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
+		VR_DrawBeam(eye, vr.beamVerts, vr.beamVertexCount);
+	}
+
+	// The compositor reads the alpha channel; the engine leaves it at whatever
+	// the scene wrote, which shows up as a translucent image.
 	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
 	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	// Diagnostic only, and expensive by design: waiting for the GPU to actually
+	// finish is the only way to tell work from queueing. Everything measured so
+	// far is wall clock, which charges whichever call happens to block.
+	{
+		const int gpuStart = Sys_Milliseconds();
+
+		glFinish();
+		vr.phaseGpu += Sys_Milliseconds() - gpuStart;
+	}
 
 	if (re.SetDefaultFramebuffer) {
 		re.SetDefaultFramebuffer(0);
 	}
 
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
 	// Back to the flat projection, so anything drawn outside an eye pass - the
 	// screen layer, a loading screen - is not left with this eye's frustum.
 	if (re.SetVRView) {
-		re.SetVRView(NULL, NULL, 0.0f, 0.0f, 0.0f, 0.0f);
+		re.SetVRView(NULL, NULL, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
 	}
 
 	memset(&releaseInfo, 0, sizeof(releaseInfo));
@@ -1498,6 +2554,7 @@ void VR_FinishEye(int eye)
 	XR_CHECK(xrReleaseSwapchainImage(swapchain->handle, &releaseInfo));
 
 	swapchain->acquired = qfalse;
+	vr.phaseEyes += Sys_Milliseconds() - vr.eyeStart;
 
 	if (eye == VR_MAX_EYES - 1) {
 		vr.layerReady = qtrue;
@@ -1513,6 +2570,611 @@ void VR_FinishEye(int eye)
 	vr.projectionViews[eye].subImage.imageRect.offset.y = 0;
 	vr.projectionViews[eye].subImage.imageRect.extent.width = (int32_t)swapchain->width;
 	vr.projectionViews[eye].subImage.imageRect.extent.height = (int32_t)swapchain->height;
+}
+
+/*
+================================================================================
+
+The pointer beam.
+
+The menu pointer has always worked - the aim ray is intersected with the panel
+and drives the engine's own cursor - but there was nothing to see, because a
+screen layer frame submits a quad and no projection layer, and a quad has no
+depth for a beam to travel through. So the eye buffers are drawn after all,
+carrying nothing but the beam, and submitted underneath the panel. The beam is
+therefore visible along its length up to the panel's edge, which is exactly the
+part worth seeing; the panel itself shows the engine's cursor.
+
+Its own GL program rather than the renderer's: this happens outside the
+renderer's frame, it is two dozen triangles, and going through the shader system
+would mean the renderer knowing about a mode it has no other reason to have.
+
+================================================================================
+*/
+
+static const char *beamVertexShader =
+	"#version 300 es\n"
+	"layout(location = 0) in vec3 aPosition;\n"
+	"uniform mat4 uMvp;\n"
+	"void main() {\n"
+	"	gl_Position = uMvp * vec4(aPosition, 1.0);\n"
+	"}\n";
+
+static const char *beamFragmentShader =
+	"#version 300 es\n"
+	"precision mediump float;\n"
+	"uniform vec4 uColor;\n"
+	"out vec4 fragColor;\n"
+	"void main() {\n"
+	"	fragColor = uColor;\n"
+	"}\n";
+
+/*
+The wrist panel's alpha.
+
+The compositor needs to know which pixels of the panel are the panel and which
+are the room behind it, and it reads that out of the alpha channel. The engine's
+2D path does not leave anything useful there - it was written for a screen, where
+there is nothing behind the screen and alpha never mattered. Forcing it opaque
+gives a black slab with a compass on it; trusting it gives a panel where the
+images survive and the text disappears, because the two go through different
+draw paths that disagree about what to put in a channel neither was using.
+
+So the alpha is worked out from what is actually on the panel instead. The HUD
+draws bright marks on a background that was cleared to black, so brightness is a
+good enough stand-in for coverage, and it does not care which path drew what.
+*/
+
+static const char *panelVertexShader =
+	"#version 300 es\n"
+	"out vec2 vTexCoord;\n"
+	"void main() {\n"
+	// One oversized triangle rather than two, from the vertex index alone, so
+	// there is no buffer to feed and no seam down the diagonal.
+	"	vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+	"	vTexCoord = p;\n"
+	"	gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+	"}\n";
+
+static const char *panelFragmentShader =
+	"#version 300 es\n"
+	"precision mediump float;\n"
+	"uniform sampler2D uTexture;\n"
+	// xy is the corner, zw the size, in texture coordinates.
+	"uniform vec4 uCrop;\n"
+	"in vec2 vTexCoord;\n"
+	"out vec4 fragColor;\n"
+	"void main() {\n"
+	"	vec4 c = texture(uTexture, uCrop.xy + vTexCoord * uCrop.zw);\n"
+	"	float a = max(max(c.r, c.g), c.b);\n"
+	// Lifted, so a thin antialiased stroke does not come out as a ghost, and
+	// clamped so the bright middle of a glyph is fully solid.
+	"	fragColor = vec4(c.rgb, clamp(a * 2.2, 0.0, 1.0));\n"
+	"}\n";
+
+/*
+==================
+VR_CompileShader
+==================
+*/
+static GLuint VR_CompileShader(GLenum type, const char *source)
+{
+	GLuint shader = glCreateShader(type);
+	GLint  compiled = 0;
+
+	glShaderSource(shader, 1, &source, NULL);
+	glCompileShader(shader);
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+
+	if (!compiled) {
+		char log[1024];
+
+		glGetShaderInfoLog(shader, sizeof(log), NULL, log);
+		Com_Printf("OpenXR: pointer beam shader failed to compile: %s\n", log);
+		glDeleteShader(shader);
+		return 0;
+	}
+
+	return shader;
+}
+
+/*
+==================
+VR_CreateBeam
+==================
+*/
+static void VR_CreateBeam(void)
+{
+	GLuint vertexShader, fragmentShader;
+	GLint  linked = 0;
+
+	VR_DestroyBeam();
+
+	vertexShader = VR_CompileShader(GL_VERTEX_SHADER, beamVertexShader);
+	fragmentShader = VR_CompileShader(GL_FRAGMENT_SHADER, beamFragmentShader);
+
+	if (!vertexShader || !fragmentShader) {
+		if (vertexShader) {
+			glDeleteShader(vertexShader);
+		}
+		if (fragmentShader) {
+			glDeleteShader(fragmentShader);
+		}
+		return;
+	}
+
+	vr.beamProgram = glCreateProgram();
+	glAttachShader(vr.beamProgram, vertexShader);
+	glAttachShader(vr.beamProgram, fragmentShader);
+	glLinkProgram(vr.beamProgram);
+	glGetProgramiv(vr.beamProgram, GL_LINK_STATUS, &linked);
+
+	// Attached shaders are reference counted by the program, so they can go now.
+	glDeleteShader(vertexShader);
+	glDeleteShader(fragmentShader);
+
+	if (!linked) {
+		char log[1024];
+
+		glGetProgramInfoLog(vr.beamProgram, sizeof(log), NULL, log);
+		Com_Printf("OpenXR: pointer beam program failed to link: %s\n", log);
+		glDeleteProgram(vr.beamProgram);
+		vr.beamProgram = 0;
+		return;
+	}
+
+	vr.beamMvpLocation = glGetUniformLocation(vr.beamProgram, "uMvp");
+	vr.beamColorLocation = glGetUniformLocation(vr.beamProgram, "uColor");
+
+	// A vertex array of its own, so none of the attribute state the renderer
+	// has set up is disturbed by binding a buffer here.
+	glGenVertexArrays(1, &vr.beamVertexArray);
+	glGenBuffers(1, &vr.beamVertexBuffer);
+
+	vr.beamReady = qtrue;
+
+	// The panel resolve, same lifetime and same tiny shape.
+	vertexShader = VR_CompileShader(GL_VERTEX_SHADER, panelVertexShader);
+	fragmentShader = VR_CompileShader(GL_FRAGMENT_SHADER, panelFragmentShader);
+
+	if (!vertexShader || !fragmentShader) {
+		if (vertexShader) {
+			glDeleteShader(vertexShader);
+		}
+		if (fragmentShader) {
+			glDeleteShader(fragmentShader);
+		}
+		return;
+	}
+
+	vr.panelProgram = glCreateProgram();
+	glAttachShader(vr.panelProgram, vertexShader);
+	glAttachShader(vr.panelProgram, fragmentShader);
+	glLinkProgram(vr.panelProgram);
+	glGetProgramiv(vr.panelProgram, GL_LINK_STATUS, &linked);
+
+	glDeleteShader(vertexShader);
+	glDeleteShader(fragmentShader);
+
+	if (!linked) {
+		char log[1024];
+
+		glGetProgramInfoLog(vr.panelProgram, sizeof(log), NULL, log);
+		Com_Printf("OpenXR: panel resolve program failed to link: %s\n", log);
+		glDeleteProgram(vr.panelProgram);
+		vr.panelProgram = 0;
+		return;
+	}
+
+	vr.panelTextureLocation = glGetUniformLocation(vr.panelProgram, "uTexture");
+	vr.panelCropLocation = glGetUniformLocation(vr.panelProgram, "uCrop");
+
+	// Empty, but a vertex array still has to be bound to draw at all.
+	glGenVertexArrays(1, &vr.panelVertexArray);
+
+	vr.panelReady = qtrue;
+}
+
+/*
+==================
+VR_DestroyBeam
+==================
+*/
+static void VR_DestroyBeam(void)
+{
+	if (vr.panelVertexArray) {
+		glDeleteVertexArrays(1, &vr.panelVertexArray);
+		vr.panelVertexArray = 0;
+	}
+
+	if (vr.panelProgram) {
+		glDeleteProgram(vr.panelProgram);
+		vr.panelProgram = 0;
+	}
+
+	vr.panelReady = qfalse;
+
+	if (vr.beamVertexBuffer) {
+		glDeleteBuffers(1, &vr.beamVertexBuffer);
+		vr.beamVertexBuffer = 0;
+	}
+
+	if (vr.beamVertexArray) {
+		glDeleteVertexArrays(1, &vr.beamVertexArray);
+		vr.beamVertexArray = 0;
+	}
+
+	if (vr.beamProgram) {
+		glDeleteProgram(vr.beamProgram);
+		vr.beamProgram = 0;
+	}
+
+	vr.beamReady = qfalse;
+}
+
+/*
+==================
+VR_ProjectionMatrix
+
+Straight from the runtime's frustum tangents. Asymmetric, like the eye it came
+from - see R_SetupProjection for why that matters.
+==================
+*/
+static void VR_ProjectionMatrix(const XrFovf *fov, float zNear, float zFar, float *m)
+{
+	const float tanLeft   = tanf(fov->angleLeft);
+	const float tanRight  = tanf(fov->angleRight);
+	const float tanDown   = tanf(fov->angleDown);
+	const float tanUp     = tanf(fov->angleUp);
+	const float tanWidth  = tanRight - tanLeft;
+	const float tanHeight = tanUp - tanDown;
+
+	memset(m, 0, 16 * sizeof(float));
+
+	m[0]  = 2.0f / tanWidth;
+	m[5]  = 2.0f / tanHeight;
+	m[8]  = (tanRight + tanLeft) / tanWidth;
+	m[9]  = (tanUp + tanDown) / tanHeight;
+	m[10] = -(zFar + zNear) / (zFar - zNear);
+	m[11] = -1.0f;
+	m[14] = -(2.0f * zFar * zNear) / (zFar - zNear);
+}
+
+/*
+==================
+VR_ViewMatrix
+
+The inverse of an eye pose. Everything the beam is built from is already in
+stage space, so this is the only transform between the two.
+==================
+*/
+static void VR_ViewMatrix(const XrPosef *pose, float *m)
+{
+	const XrQuaternionf *q = &pose->orientation;
+	float                r[3][3];
+	int                  i;
+
+	r[0][0] = 1.0f - 2.0f * (q->y * q->y + q->z * q->z);
+	r[0][1] =        2.0f * (q->x * q->y - q->z * q->w);
+	r[0][2] =        2.0f * (q->x * q->z + q->y * q->w);
+	r[1][0] =        2.0f * (q->x * q->y + q->z * q->w);
+	r[1][1] = 1.0f - 2.0f * (q->x * q->x + q->z * q->z);
+	r[1][2] =        2.0f * (q->y * q->z - q->x * q->w);
+	r[2][0] =        2.0f * (q->x * q->z - q->y * q->w);
+	r[2][1] =        2.0f * (q->y * q->z + q->x * q->w);
+	r[2][2] = 1.0f - 2.0f * (q->x * q->x + q->y * q->y);
+
+	memset(m, 0, 16 * sizeof(float));
+
+	// Column major, and the rotation transposed because this is the inverse.
+	for (i = 0; i < 3; i++) {
+		m[i * 4 + 0] = r[i][0];
+		m[i * 4 + 1] = r[i][1];
+		m[i * 4 + 2] = r[i][2];
+	}
+
+	m[12] = -(r[0][0] * pose->position.x + r[1][0] * pose->position.y + r[2][0] * pose->position.z);
+	m[13] = -(r[0][1] * pose->position.x + r[1][1] * pose->position.y + r[2][1] * pose->position.z);
+	m[14] = -(r[0][2] * pose->position.x + r[1][2] * pose->position.y + r[2][2] * pose->position.z);
+	m[15] = 1.0f;
+}
+
+/*
+==================
+VR_MatrixMultiply
+==================
+*/
+static void VR_MatrixMultiply(const float *a, const float *b, float *out)
+{
+	int column, row, i;
+
+	for (column = 0; column < 4; column++) {
+		for (row = 0; row < 4; row++) {
+			float sum = 0.0f;
+
+			for (i = 0; i < 4; i++) {
+				sum += a[i * 4 + row] * b[column * 4 + i];
+			}
+
+			out[column * 4 + row] = sum;
+		}
+	}
+}
+
+/*
+==================
+VR_AppendBox
+
+A box rather than a billboarded strip: it is a handful more triangles and it
+looks the same from every angle, which a strip only does if it is rebuilt per
+eye.
+==================
+*/
+static float *VR_AppendBox(float *out, const XrVector3f *centre,
+	const XrVector3f *x, const XrVector3f *y, const XrVector3f *z)
+{
+	static const int faces[6][4] = {
+		{ 0, 1, 3, 2 },	// -z
+		{ 4, 6, 7, 5 },	// +z
+		{ 0, 4, 5, 1 },	// -y
+		{ 2, 3, 7, 6 },	// +y
+		{ 0, 2, 6, 4 },	// -x
+		{ 1, 5, 7, 3 },	// +x
+	};
+	XrVector3f corner[8];
+	int        i, f;
+
+	for (i = 0; i < 8; i++) {
+		const float sx = (i & 4) ? 1.0f : -1.0f;
+		const float sy = (i & 2) ? 1.0f : -1.0f;
+		const float sz = (i & 1) ? 1.0f : -1.0f;
+
+		corner[i].x = centre->x + x->x * sx + y->x * sy + z->x * sz;
+		corner[i].y = centre->y + x->y * sx + y->y * sy + z->y * sz;
+		corner[i].z = centre->z + x->z * sx + y->z * sy + z->z * sz;
+	}
+
+	for (f = 0; f < 6; f++) {
+		static const int order[6] = { 0, 1, 2, 0, 2, 3 };
+
+		for (i = 0; i < 6; i++) {
+			const XrVector3f *v = &corner[faces[f][order[i]]];
+
+			*out++ = v->x;
+			*out++ = v->y;
+			*out++ = v->z;
+		}
+	}
+
+	return out;
+}
+
+/*
+==================
+VR_BuildBeamGeometry
+
+Stage space, so it lines up with the eye poses without going through the
+engine's axes at all. Returns the vertex count.
+==================
+*/
+static int VR_BuildBeamGeometry(float *verts, int maxVerts)
+{
+	static const XrVector3f localForward = { 0.0f, 0.0f, -1.0f };
+	static const XrVector3f localRight   = { 1.0f, 0.0f, 0.0f };
+	static const XrVector3f localUp      = { 0.0f, 1.0f, 0.0f };
+	const float             thickness    = 0.0035f;
+	const float             handSize     = 0.014f;
+	float                  *out = verts;
+	int                     hand;
+
+	for (hand = 0; hand < 2; hand++) {
+		XrVector3f forward, right, up, centre, ax, ay, az;
+		float      length;
+		qboolean   wearingPanel;
+
+		if (!vr.handPoseValid[hand]) {
+			continue;
+		}
+
+		if ((out - verts) / 3 + 72 > maxVerts) {
+			break;
+		}
+
+		VR_RotateVector(&vr.handPoses[hand].orientation, &localForward, &forward);
+		VR_RotateVector(&vr.handPoses[hand].orientation, &localRight, &right);
+		VR_RotateVector(&vr.handPoses[hand].orientation, &localUp, &up);
+
+		// The hand the panel is strapped to gets a marker and no beam. It is not
+		// pointing at anything - it is the thing being pointed at.
+		wearingPanel = (vr.wristVisible && hand == 0) ? qtrue : qfalse;
+
+		if (!wearingPanel) {
+			// The hand actually on the panel stops at it; the other gets a stub,
+			// so it reads as a pointer without a beam running off into the room.
+			if (hand == vr.pointerHand && vr.pointerDistance > 0.0f) {
+				length = vr.pointerDistance;
+			} else {
+				length = 0.35f;
+			}
+
+			// The beam, from the hand along its aim.
+			centre.x = vr.handPoses[hand].position.x + forward.x * length * 0.5f;
+			centre.y = vr.handPoses[hand].position.y + forward.y * length * 0.5f;
+			centre.z = vr.handPoses[hand].position.z + forward.z * length * 0.5f;
+
+			ax.x = right.x * thickness;   ax.y = right.y * thickness;   ax.z = right.z * thickness;
+			ay.x = up.x * thickness;      ay.y = up.y * thickness;      ay.z = up.z * thickness;
+			az.x = forward.x * length * 0.5f;
+			az.y = forward.y * length * 0.5f;
+			az.z = forward.z * length * 0.5f;
+
+			out = VR_AppendBox(out, &centre, &ax, &ay, &az);
+		}
+
+		// A marker where the hand is, so the beam reads as coming from
+		// something rather than starting in mid air.
+		centre = vr.handPoses[hand].position;
+
+		ax.x = right.x * handSize;    ax.y = right.y * handSize;    ax.z = right.z * handSize;
+		ay.x = up.x * handSize;       ay.y = up.y * handSize;       ay.z = up.z * handSize;
+		az.x = forward.x * handSize;  az.y = forward.y * handSize;  az.z = forward.z * handSize;
+
+		out = VR_AppendBox(out, &centre, &ax, &ay, &az);
+	}
+
+	return (int)(out - verts) / 3;
+}
+
+/*
+==================
+VR_DrawBeam
+
+State is saved and put back rather than assumed: this runs between the
+renderer's frames, and renderergl2 caches what it believes is bound. Leaving a
+different program or vertex array behind makes the next frame draw nothing, in a
+way that looks like a renderer bug rather than an overlay one.
+==================
+*/
+static void VR_DrawBeam(int eye, const float *verts, int vertexCount)
+{
+	float proj[16], view[16], mvp[16];
+	GLint prevProgram = 0, prevVertexArray = 0, prevArrayBuffer = 0;
+	GLint prevBlendSrc = GL_ONE, prevBlendDst = GL_ZERO;
+	GLboolean prevDepthMask = GL_TRUE;
+	GLboolean wasDepthTest, wasBlend, wasCull;
+
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVertexArray);
+	glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prevArrayBuffer);
+	glGetIntegerv(GL_BLEND_SRC_ALPHA, &prevBlendSrc);
+	glGetIntegerv(GL_BLEND_DST_ALPHA, &prevBlendDst);
+	glGetBooleanv(GL_DEPTH_WRITEMASK, &prevDepthMask);
+	wasDepthTest = glIsEnabled(GL_DEPTH_TEST);
+	wasBlend = glIsEnabled(GL_BLEND);
+	wasCull = glIsEnabled(GL_CULL_FACE);
+
+	VR_ProjectionMatrix(&vr.views[eye].fov, 0.02f, 50.0f, proj);
+	VR_ViewMatrix(&vr.views[eye].pose, view);
+	VR_MatrixMultiply(proj, view, mvp);
+
+	glUseProgram(vr.beamProgram);
+	glUniformMatrix4fv(vr.beamMvpLocation, 1, GL_FALSE, mvp);
+	glUniform4f(vr.beamColorLocation, 0.45f, 0.72f, 1.0f, 0.85f);
+
+	glBindVertexArray(vr.beamVertexArray);
+	glBindBuffer(GL_ARRAY_BUFFER, vr.beamVertexBuffer);
+	glBufferData(GL_ARRAY_BUFFER, vertexCount * 3 * sizeof(float), verts, GL_STREAM_DRAW);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), NULL);
+
+	glEnable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+	glDisable(GL_CULL_FACE);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	glDrawArrays(GL_TRIANGLES, 0, vertexCount);
+
+	glBindVertexArray((GLuint)prevVertexArray);
+	glBindBuffer(GL_ARRAY_BUFFER, (GLuint)prevArrayBuffer);
+	glUseProgram((GLuint)prevProgram);
+	glDepthMask(prevDepthMask);
+	glBlendFunc(prevBlendSrc, prevBlendDst);
+
+	if (!wasDepthTest) {
+		glDisable(GL_DEPTH_TEST);
+	}
+	if (!wasBlend) {
+		glDisable(GL_BLEND);
+	}
+	if (wasCull) {
+		glEnable(GL_CULL_FACE);
+	}
+}
+
+/*
+==================
+VR_RenderPointerLayer
+
+Draws the beam into both eye images and leaves the projection views set up, so
+the panel can be composited over a real 3D layer instead of replacing it.
+==================
+*/
+static void VR_RenderPointerLayer(void)
+{
+	int eye;
+
+	vr.pointerLayerReady = qfalse;
+
+	if (!vr.beamReady || !vr.viewsValid || !vr.frameState.shouldRender) {
+		return;
+	}
+
+	if (vr.vr_pointerBeam && !vr.vr_pointerBeam->integer) {
+		return;
+	}
+
+	if (!vr.beamVertexCount) {
+		return;
+	}
+
+	for (eye = 0; eye < VR_MAX_EYES; eye++) {
+		vrSwapchain_t               *swapchain = &vr.swapchains[eye];
+		XrSwapchainImageAcquireInfo  acquireInfo;
+		XrSwapchainImageWaitInfo     waitInfo;
+		XrSwapchainImageReleaseInfo  releaseInfo;
+
+		memset(&acquireInfo, 0, sizeof(acquireInfo));
+		acquireInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
+
+		if (!XR_CHECK(xrAcquireSwapchainImage(swapchain->handle, &acquireInfo, &swapchain->acquiredIndex))) {
+			return;
+		}
+
+		memset(&releaseInfo, 0, sizeof(releaseInfo));
+		releaseInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+
+		memset(&waitInfo, 0, sizeof(waitInfo));
+		waitInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
+		waitInfo.timeout = 100 * 1000 * 1000;
+
+		// Released even when the wait fails: the image is acquired either way,
+		// and holding one back starves the swapchain within a few frames.
+		if (!XR_CHECK(xrWaitSwapchainImage(swapchain->handle, &waitInfo))) {
+			XR_CHECK(xrReleaseSwapchainImage(swapchain->handle, &releaseInfo));
+			return;
+		}
+
+		glBindFramebuffer(GL_FRAMEBUFFER, swapchain->frameBuffers[swapchain->acquiredIndex]);
+		glViewport(0, 0, (GLsizei)swapchain->width, (GLsizei)swapchain->height);
+		glDisable(GL_SCISSOR_TEST);
+		// Cleared to nothing, so this layer is the beam and nothing else. It
+		// goes over the panel rather than under it: a pointer you cannot see
+		// touch the thing it is pointing at is not much of a pointer, and the
+		// menu is the one place the beam actually has a job.
+		glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+		glDepthMask(GL_TRUE);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+		VR_DrawBeam(eye, vr.beamVerts, vr.beamVertexCount);
+
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+		XR_CHECK(xrReleaseSwapchainImage(swapchain->handle, &releaseInfo));
+
+		vr.projectionViews[eye].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+		vr.projectionViews[eye].next = NULL;
+		vr.projectionViews[eye].pose = vr.views[eye].pose;
+		vr.projectionViews[eye].fov = vr.views[eye].fov;
+		vr.projectionViews[eye].subImage.swapchain = swapchain->handle;
+		vr.projectionViews[eye].subImage.imageArrayIndex = 0;
+		vr.projectionViews[eye].subImage.imageRect.offset.x = 0;
+		vr.projectionViews[eye].subImage.imageRect.offset.y = 0;
+		vr.projectionViews[eye].subImage.imageRect.extent.width = (int32_t)swapchain->width;
+		vr.projectionViews[eye].subImage.imageRect.extent.height = (int32_t)swapchain->height;
+	}
+
+	vr.pointerLayerReady = qtrue;
 }
 
 /*
@@ -1593,15 +3255,17 @@ void VR_PrepareScreenLayer(void)
 		VR_PlaceScreenAnchor();
 	}
 
+	// Renderer first, so that anything it is still holding is flushed into the
+	// target it was drawn for; see VR_PrepareEye.
+	if (re.SetDefaultFramebuffer) {
+		re.SetDefaultFramebuffer(vr.uiFramebuffer);
+	}
+
 	// Deliberately not cleared: the engine's 2D path treats the screen as
 	// something that persists between frames, and this buffer is the only
 	// place that is true.
 	glBindFramebuffer(GL_FRAMEBUFFER, vr.uiFramebuffer);
 	glViewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
-
-	if (re.SetDefaultFramebuffer) {
-		re.SetDefaultFramebuffer(vr.uiFramebuffer);
-	}
 }
 
 /*
@@ -1663,6 +3327,265 @@ void VR_FinishScreenLayer(void)
 	swapchain->acquired = qfalse;
 	vr.screenLayerActive = qtrue;
 	vr.layerReady = qtrue;
+
+	// After the panel, because it goes underneath it.
+	VR_RenderPointerLayer();
+}
+
+/*
+==================
+VR_ResolveWristPanel
+
+Copies the panel into the swapchain image, working out the alpha as it goes.
+==================
+*/
+static void VR_ResolveWristPanel(GLuint target)
+{
+	GLint     prevProgram = 0, prevVertexArray = 0, prevTexture = 0, prevActive = GL_TEXTURE0;
+	GLboolean wasDepthTest, wasBlend, wasCull;
+
+	if (!vr.panelReady) {
+		return;
+	}
+
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVertexArray);
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActive);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTexture);
+	wasDepthTest = glIsEnabled(GL_DEPTH_TEST);
+	wasBlend = glIsEnabled(GL_BLEND);
+	wasCull = glIsEnabled(GL_CULL_FACE);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, target);
+	glViewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
+
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+	glDisable(GL_CULL_FACE);
+
+	glUseProgram(vr.panelProgram);
+	glBindTexture(GL_TEXTURE_2D, vr.uiTexture);
+	glUniform1i(vr.panelTextureLocation, 0);
+
+	{
+		float cropX, cropY, cropWidth, cropHeight;
+
+		VR_WristCrop(&cropX, &cropY, &cropWidth, &cropHeight);
+
+		// The crop is given from the top, the way the engine's screen is
+		// measured; texture coordinates run the other way, because the 2D ortho
+		// puts the top of the screen at the top of the framebuffer.
+		glUniform4f(vr.panelCropLocation, cropX, 1.0f - (cropY + cropHeight),
+			cropWidth, cropHeight);
+	}
+
+	glBindVertexArray(vr.panelVertexArray);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	glBindVertexArray((GLuint)prevVertexArray);
+	glBindTexture(GL_TEXTURE_2D, (GLuint)prevTexture);
+	glActiveTexture((GLenum)prevActive);
+	glUseProgram((GLuint)prevProgram);
+
+	if (wasDepthTest) {
+		glEnable(GL_DEPTH_TEST);
+	}
+	if (wasBlend) {
+		glEnable(GL_BLEND);
+	}
+	if (wasCull) {
+		glEnable(GL_CULL_FACE);
+	}
+}
+
+/*
+==================
+VR_PrepareWristPanel
+
+The HUD and any open menu, drawn once into the same buffer the room sized panel
+uses. The two are never up together - one is what the player sees instead of the
+world, the other is what they see over it - so they can share.
+
+Cleared, unlike the screen layer: that one is deliberately left alone because
+the engine's 2D path treats the screen as something that persists between
+frames, but a HUD that accumulated would smear.
+==================
+*/
+void VR_PrepareWristPanel(void)
+{
+	if (!vr.frameStarted) {
+		return;
+	}
+
+	// Renderer first, so that anything it is still holding is flushed into the
+	// target it was drawn for; see VR_PrepareEye.
+	if (re.SetDefaultFramebuffer) {
+		re.SetDefaultFramebuffer(vr.uiFramebuffer);
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, vr.uiFramebuffer);
+	glViewport(0, 0, (GLsizei)vr.uiSwapchain.width, (GLsizei)vr.uiSwapchain.height);
+	glDisable(GL_SCISSOR_TEST);
+
+	// Cleared to nothing at all, not to black. The panel is a strip of readouts
+	// worn on the arm, not a screen: what the HUD does not draw on should be the
+	// room behind it. The alpha the 2D path leaves behind is what the compositor
+	// uses to decide that, so the clear has to start it at zero.
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+}
+
+/*
+==================
+VR_FinishWristPanel
+==================
+*/
+void VR_FinishWristPanel(void)
+{
+	vrSwapchain_t               *swapchain = &vr.uiSwapchain;
+	XrSwapchainImageAcquireInfo  acquireInfo;
+	XrSwapchainImageWaitInfo     waitInfo;
+	XrSwapchainImageReleaseInfo  releaseInfo;
+
+	vr.wristLayerReady = qfalse;
+
+	if (!vr.frameStarted) {
+		return;
+	}
+
+	if (re.SetDefaultFramebuffer) {
+		re.SetDefaultFramebuffer(0);
+	}
+
+	memset(&acquireInfo, 0, sizeof(acquireInfo));
+	acquireInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
+
+	if (!XR_CHECK(xrAcquireSwapchainImage(swapchain->handle, &acquireInfo, &swapchain->acquiredIndex))) {
+		return;
+	}
+
+	memset(&releaseInfo, 0, sizeof(releaseInfo));
+	releaseInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+
+	memset(&waitInfo, 0, sizeof(waitInfo));
+	waitInfo.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
+	waitInfo.timeout = 100 * 1000 * 1000;
+
+	if (!XR_CHECK(xrWaitSwapchainImage(swapchain->handle, &waitInfo))) {
+		XR_CHECK(xrReleaseSwapchainImage(swapchain->handle, &releaseInfo));
+		return;
+	}
+
+	glDisable(GL_SCISSOR_TEST);
+
+	// Through the resolve rather than a straight blit, because the alpha has to
+	// be worked out on the way across - see panelFragmentShader. A blit would
+	// carry over whatever the 2D path happened to leave in that channel, which
+	// is what made the text vanish while the compass survived.
+	VR_ResolveWristPanel(swapchain->frameBuffers[swapchain->acquiredIndex]);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	XR_CHECK(xrReleaseSwapchainImage(swapchain->handle, &releaseInfo));
+
+	swapchain->acquired = qfalse;
+	vr.wristLayerReady = qtrue;
+}
+
+/*
+==================
+VR_TraceFrameTiming
+
+What the frame actually costs, once a second, to the log - there being no
+console in a headset to put a counter on.
+
+The display period comes from the runtime rather than from what was asked for,
+so this reports the rate the compositor is really running at whether or not the
+refresh rate request landed. Frames below that rate are frames the compositor
+had to reproject, which is the number that decides how ambitious anything else
+can be.
+==================
+*/
+static void VR_TraceFrameTiming(void)
+{
+	static int lastReport;
+	static int lastFrame;
+	static int frames;
+	static int worst;
+	static int over;
+	int        now = Sys_Milliseconds();
+	int        elapsed;
+	float      target;
+
+	target = (vr.frameState.predictedDisplayPeriod > 0)
+		? 1000000000.0f / (float)vr.frameState.predictedDisplayPeriod
+		: 0.0f;
+
+	if (lastFrame) {
+		const int frameTime = now - lastFrame;
+
+		if (frameTime > worst) {
+			worst = frameTime;
+		}
+
+		// A frame that took longer than the display period is one the
+		// compositor had to make something up for.
+		if (target > 0.0f && frameTime > (int)(1000.0f / target)) {
+			over++;
+		}
+	}
+
+	lastFrame = now;
+	frames++;
+
+	elapsed = now - lastReport;
+
+	if (elapsed < 1000) {
+		return;
+	}
+
+	Com_Printf("VR frame: %.1f fps, display %.0fHz, worst %dms, %d/%d late"
+		" | eyes %dms = world %dms + hud %dms (cgame %dms) + rest %dms\n",
+		frames * 1000.0f / (float)elapsed, target, worst, over, frames,
+		vr.phaseEyes / frames, vr.phaseWorld / frames,
+		vr.phaseHud / frames, vr.phaseCgameHud / frames,
+		(vr.phaseEyes - vr.phaseWorld - vr.phaseHud) / frames);
+
+	Com_Printf("VR paths: draw2d %d cgame2d %d updateviews %d view3d %d"
+		" | mode %d hudPass %d noMenus %d | res %ux%u | gpuwait %dms\n",
+		vr.traceEvents[VRTRACE_DRAW2D], vr.traceEvents[VRTRACE_CGAME_HUD],
+		vr.traceEvents[VRTRACE_UPDATEVIEWS], vr.traceEvents[VRTRACE_VIEW3D],
+		vr.traceDrawMode, vr.traceHudPass, vr.traceNoMenus,
+		vr.eyeWidth, vr.eyeHeight, vr.phaseGpu / frames);
+
+	Com_Printf("VR hud: setup %dms fades %dms cgame %dms prints %dms overlays %dms tail %dms\n",
+		vr.hudSetup / frames, vr.hudFades / frames, vr.phaseCgameHud / frames,
+		vr.hudPrints / frames, vr.hudOverlays / frames, vr.hudTail / frames);
+
+	vr.hudSetup = 0;
+	vr.hudFades = 0;
+	vr.hudPrints = 0;
+	vr.hudOverlays = 0;
+	vr.hudTail = 0;
+
+	memset(vr.traceEvents, 0, sizeof(vr.traceEvents));
+	vr.phaseGpu = 0;
+
+	lastReport = now;
+	frames = 0;
+	worst = 0;
+	over = 0;
+	vr.phaseEyes = 0;
+	vr.phaseWait = 0;
+	vr.phaseSubmit = 0;
+	vr.phaseFrontEnd = 0;
+	vr.phaseBackEnd = 0;
+	vr.phaseScene = 0;
+	vr.phaseIssue = 0;
+	vr.phaseWorld = 0;
+	vr.phaseHud = 0;
+	vr.phaseCgameHud = 0;
 }
 
 /*
@@ -1672,15 +3595,23 @@ VR_SubmitFrame
 */
 void VR_SubmitFrame(void)
 {
+	const int                           submitStart = Sys_Milliseconds();
 	XrCompositionLayerProjection        projection;
 	XrCompositionLayerQuad              quad;
-	const XrCompositionLayerBaseHeader  *layers[1];
+	const XrCompositionLayerBaseHeader  *layers[2];
 	XrFrameEndInfo                      endInfo;
 	int                                 layerCount = 0;
 
 	if (!vr.frameStarted) {
 		return;
 	}
+
+	memset(&projection, 0, sizeof(projection));
+	projection.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
+	projection.layerFlags = XR_COMPOSITION_LAYER_CORRECT_CHROMATIC_ABERRATION_BIT;
+	projection.space = vr.stageSpace;
+	projection.viewCount = VR_MAX_EYES;
+	projection.views = vr.projectionViews;
 
 	if (vr.screenLayerActive && vr.screenAnchorValid) {
 		const float size = vr.vr_screenSize->value > 0.0f ? vr.vr_screenSize->value : 3.0f;
@@ -1704,15 +3635,61 @@ void VR_SubmitFrame(void)
 		quad.size.height = size * (float)vr.uiSwapchain.height / (float)vr.uiSwapchain.width;
 
 		layers[layerCount++] = (const XrCompositionLayerBaseHeader *)&quad;
-	} else {
-		memset(&projection, 0, sizeof(projection));
-		projection.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
-		projection.layerFlags = XR_COMPOSITION_LAYER_CORRECT_CHROMATIC_ABERRATION_BIT;
-		projection.space = vr.stageSpace;
-		projection.viewCount = VR_MAX_EYES;
-		projection.views = vr.projectionViews;
 
+		// Layers composite in the order they go in, so the beam goes last and
+		// lands on top of the menu it is pointing at. It only carries the beam;
+		// everywhere else it is transparent, which is what lets it sit over the
+		// panel without hiding it.
+		if (vr.pointerLayerReady) {
+			projection.layerFlags |= XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT
+				| XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+			layers[layerCount++] = (const XrCompositionLayerBaseHeader *)&projection;
+		}
+	} else {
 		layers[layerCount++] = (const XrCompositionLayerBaseHeader *)&projection;
+
+		// The world first, then the wrist panel over it. Same ordering rule as
+		// the menu: the layer submitted later is the one on top.
+		if (vr.wristLayerReady) {
+			const float size = vr.vr_wristSize->value > 0.0f ? vr.vr_wristSize->value : 0.32f;
+
+			memset(&quad, 0, sizeof(quad));
+			quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+			// Blended against the world rather than laid over it, using the
+			// alpha the HUD wrote. Unpremultiplied because that is what ordinary
+			// alpha blending leaves in the buffer - claiming otherwise darkens
+			// every edge.
+			quad.layerFlags = XR_COMPOSITION_LAYER_CORRECT_CHROMATIC_ABERRATION_BIT
+				| XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT
+				| XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+			quad.space = vr.stageSpace;
+			quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+			quad.subImage.swapchain = vr.uiSwapchain.handle;
+			quad.subImage.imageArrayIndex = 0;
+			{
+				float cropX, cropY, cropWidth, cropHeight;
+
+				VR_WristCrop(&cropX, &cropY, &cropWidth, &cropHeight);
+
+				// The whole image: the crop happened on the way in, in the
+				// resolve, so the swapchain image already holds only the part
+				// that is meant to be seen.
+				quad.subImage.imageRect.offset.x = 0;
+				quad.subImage.imageRect.offset.y = 0;
+				quad.subImage.imageRect.extent.width = (int32_t)vr.uiSwapchain.width;
+				quad.subImage.imageRect.extent.height = (int32_t)vr.uiSwapchain.height;
+
+				quad.pose = vr.wristPose;
+				quad.size.width = size;
+				// The shape of what was cropped, not of the buffer, or a strip
+				// off the top of the screen comes out as tall as the screen.
+				quad.size.height = size
+					* (cropHeight * (float)vr.uiSwapchain.height)
+					/ (cropWidth * (float)vr.uiSwapchain.width);
+			}
+
+			layers[layerCount++] = (const XrCompositionLayerBaseHeader *)&quad;
+		}
 	}
 
 	memset(&endInfo, 0, sizeof(endInfo));
@@ -1724,8 +3701,16 @@ void VR_SubmitFrame(void)
 
 	XR_CHECK(xrEndFrame(vr.session, &endInfo));
 
+	vr.phaseSubmit += Sys_Milliseconds() - submitStart;
+
+	if (!vr_traceFrame || vr_traceFrame->integer) {
+		VR_TraceFrameTiming();
+	}
+
 	vr.frameStarted = qfalse;
 	vr.layerReady = qfalse;
+	vr.pointerLayerReady = qfalse;
+	vr.wristLayerReady = qfalse;
 
 	if (!vr.screenLayerActive) {
 		// Back in the world, so forget where the panel was; the next time flat

@@ -40,15 +40,20 @@ cmake --build build-android-arm64 -j$(nproc)
 `ANDROID_STL=c++_shared` matters: the APK ships several libraries that use the
 C++ standard library, and they have to share one copy of it.
 
-SDL2 and OpenAL Soft have no Android binaries to fall back on, so both are
-downloaded and built from source. To build against trees you already have,
-pass `-DSDL2_SOURCE_PATH=...` and `-DOPENAL_SOURCE_PATH=...`.
+SDL2, OpenAL Soft and gl4es have no Android binaries to fall back on, so all
+are downloaded and built from source. To build against trees you already have,
+pass `-DSDL2_SOURCE_PATH=...`, `-DOPENAL_SOURCE_PATH=...` and
+`-DGL4ES_SOURCE_PATH=...`.
 
-Several defaults change on Android and are forced in
-`cmake/platforms/android.cmake`:
+Several defaults change on Android, in `cmake/platforms/android.cmake`:
 
-- **`renderergl1` is not built.** It is fixed function and would need a
-  GL-over-GLES translation layer. `renderergl2` speaks GLES directly.
+- **`renderergl1` is the renderer**, with **`USE_GL4ES=ON`** underneath it.
+  renderergl1 is fixed function, which is what this game's art was authored
+  for, and gl4es translates its OpenGL 1.x calls to the OpenGL ES the device
+  actually has. renderergl2 speaks GLES directly and was the first thing to run
+  here, but it spends tens of milliseconds of CPU per eye binding GLSL programs
+  for lighting this content has no maps to feed. It is still reachable with
+  `-DBUILD_RENDERER_GL1=OFF -DBUILD_RENDERER_GL2=ON -DUSE_GL4ES=OFF`.
 - **`USE_RENDERER_DLOPEN=OFF`** — the renderer is linked into the client
   rather than loaded from a path the Android linker may object to.
 - **`USE_HTTP=OFF`** — only used for downloading content from a server.
