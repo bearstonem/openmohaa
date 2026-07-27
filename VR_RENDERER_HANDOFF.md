@@ -497,6 +497,37 @@ has never been observed to fire; it is a guard, not a fix.
 
 ## 10. Working notes
 
+**The device configuration lives at `misc/android/autoexec.cfg`.** It holds the
+overrides the world currently needs to draw at all (`r_noCull 1`, `r_noDepth 1`)
+and is not part of the APK - deploy it next to the game data:
+
+```sh
+adb push misc/android/autoexec.cfg \
+  /sdcard/Android/data/org.openmoh.openmohaa/files/main/autoexec.cfg
+adb shell am force-stop org.openmoh.openmohaa
+```
+
+**`autoexec.cfg` is the only way to set a cvar on this device.** There is no
+console in a headset. It is exec'd by `Com_ExecuteCfg` after `omconfig.cfg`,
+cannot be loaded out of a pk3 (`FS_FOpenFileRead`'s `isLocalConfig`), and lands
+*before* `R_Init` - so the renderer's `Cvar_Get` finds each cvar already present
+and keeps this value instead of its own default. That covers `CVAR_LATCH` and
+`CVAR_ARCHIVE` cvars too. It cannot reach `VR_TuningCvar` cvars, which force
+their value at every start, and `CVAR_CHEAT` cvars get reset on map load.
+
+**Set every knob explicitly, never by omission.** A value left out is whatever
+`omconfig.cfg` last archived. `cg_shadows` cost a whole round trip that way: it
+was already 0 in the stored config, so the run that was supposed to test
+disabling shadows tested nothing at all. **Read the stored config before
+believing a negative result** - `adb pull .../files/main/configs/omconfig.cfg`.
+
+**`adb install -r` does not kill a running process.** The old code keeps running
+and the next launch resumes it, so a run can silently test the previous build.
+Always `adb shell am force-stop org.openmoh.openmohaa` after installing.
+
+**Pull captures individually, not the directory.** `adb pull .../files/main/`
+drags 1.6 GB of pk3s. `adb pull .../main/vrshot0.tga` is what you want.
+
 **Device.** `adb connect 192.168.1.92:43105`. It sleeps and the connection dies;
 `adb disconnect` then `adb connect`. **Launch from inside the headset** — never
 `adb shell am start`.
