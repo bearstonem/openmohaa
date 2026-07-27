@@ -440,6 +440,21 @@ functions exported to the main executable
 
         size_t (*getConfigStringIdNormalized)(size_t num);
 
+        /**
+         * Where the weapon hand is, when a headset is driving the game.
+         *
+         * offset is the hand relative to the head, in engine units and the
+         * engine's frame - add it to the view origin. angles carry the
+         * controller's pitch and roll, and in YAW how far the hand leads the
+         * head, to be added to the view yaw. headHeight is the head above the
+         * floor in metres, so the weapon can sit at the player's real hand
+         * height rather than at eye level.
+         *
+         * False when there is no headset or the hand is untracked, in which
+         * case the caller keeps the placement it had.
+         */
+        qboolean (*VR_GetWeaponPose)(vec3_t offset, vec3_t angles, float *headHeight);
+
         cvar_t       *fsDebug;
         hdelement_t  *HudDrawElements;
         clientAnim_t *anim;

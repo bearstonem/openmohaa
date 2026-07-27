@@ -22,6 +22,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // cl_cgame.c  -- client system interaction with client game
 
 #include "client.h"
+#ifdef USE_OPENXR
+#include "../vr/vr_common.h"
+#endif
 #include "cl_ui.h"
 #include "cl_uiradar.h"
 #include "../corepp/tiki.h"
@@ -519,6 +522,24 @@ void CL_R_AddPolyToScene( qhandle_t hShader, int numVerts, const polyVert_t *ver
 
 /*
 ====================
+CL_VR_GetWeaponPose
+
+Hands the weapon hand's pose to cgame, so the view model sits where the
+controller is rather than bolted to the middle of the screen.
+
+Answers false without a headset, and cgame keeps its own placement.
+====================
+*/
+static qboolean CL_VR_GetWeaponPose( vec3_t offset, vec3_t angles, float *headHeight ) {
+#ifdef USE_OPENXR
+	return VR_GetWeaponPose( offset, angles, headHeight );
+#else
+	return qfalse;
+#endif
+}
+
+/*
+====================
 CL_GetShaderPointer
 ====================
 */
@@ -827,6 +848,7 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 	cgi->CL_ClearSavedCgameState	= CL_ClearSavedCgameState;
 
 	cgi->getConfigStringIdNormalized = CPT_NormalizeConfigstring;
+	cgi->VR_GetWeaponPose            = CL_VR_GetWeaponPose;
 
 	cgi->fsDebug					= fs_debug;
 	cgi->HudDrawElements			= cls.HudDrawElements;
@@ -908,6 +930,7 @@ void CL_InitClientSavedData( void ) {
 	CL_InitializeHudDrawElements();
 	CL_InitializeStopwatch();
 }
+
 
 /*
 ====================

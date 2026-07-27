@@ -497,6 +497,19 @@ typedef struct gameImport_s {
     int (*pvssoundindex)(const char* name, int streamed);
     void (*KickClientForReason)(int clientNum, const char *reason);
     cvar_t *(*Cvar_Find)(const char *varName);
+    /**
+     * Where the weapon hand is pointing, when a headset is driving the game.
+     *
+     * out[PITCH] is the controller's own pitch; out[YAW] is how far the hand
+     * leads the head, to be added to the view yaw the game already has;
+     * out[ROLL] is unused. False when there is no headset or the hand is not
+     * tracked, in which case the caller keeps the aim it had.
+     *
+     * The angles come from the client, so this is a single player facility:
+     * a dedicated server has no headset to ask and always answers false.
+     */
+    qboolean (*VR_GetWeaponAim)(vec3_t out);
+
 
     unsigned int (*Client_NumPendingCommands)(int clientNum);
     unsigned int (*Client_MaxPendingCommands)(int clientNum);

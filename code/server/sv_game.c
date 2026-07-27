@@ -25,6 +25,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "../client/snd_public.h"
 #include "../client/client.h"
+#if defined(USE_OPENXR) && !defined(DEDICATED)
+#include "../vr/vr_common.h"
+#endif
 #include "../corepp/tiki.h"
 #include "../qcommon/localization.h"
 #include "../qcommon/crc.h"
@@ -1735,6 +1738,26 @@ unsigned int PF_SV_Client_MaxPendingCommands(int clientNum)
 }
 
 /*
+==================
+SV_VR_GetWeaponAim
+
+Hands the weapon hand's aim to the game, so a shot goes where the controller is
+pointing rather than where the player is looking.
+
+Single player only, and deliberately so: the angles come from a headset attached
+to this process, and a dedicated server has none. It answers false there and the
+game keeps the view aim it already had.
+==================
+*/
+static qboolean SV_VR_GetWeaponAim( vec3_t out ) {
+#if defined(USE_OPENXR) && !defined(DEDICATED)
+	return VR_GetWeaponAim( out );
+#else
+	return qfalse;
+#endif
+}
+
+/*
 ===============
 SV_InitGameProgs
 
@@ -1950,6 +1973,8 @@ void SV_InitGameProgs( void ) {
 
     import.Cvar_Find                    = Cvar_FindVar;
     
+    import.VR_GetWeaponAim              = SV_VR_GetWeaponAim;
+
     import.Client_NumPendingCommands	= PF_SV_Client_NumPendingCommands;
     import.Client_MaxPendingCommands	= PF_SV_Client_MaxPendingCommands;
 

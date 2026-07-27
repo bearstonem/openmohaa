@@ -983,6 +983,59 @@ void CG_ProcessPlayerModel()
     cg_forceModel->modified        = qfalse;
 }
 
+
+/*
+===============
+CG_VRPlaceViewModel
+
+Puts the first person model where the player's hand is.
+
+The offset arrives relative to the head, in engine units, already turned into
+the engine's frame and de-rotated by whatever heading the play space happened
+to have. Adding it to the view origin puts the weapon in the room where the
+hand is.
+
+The height needs one more step. The view origin is at the eyes, so adding a
+hand-relative-to-head offset to it would hang the weapon off the *camera*, and
+crouching or looking down would drag it about. The reference drops to the feet
+and adds the measured head height back (cg_weapons.c: origin[2] -= 64, then
++= hmdposition[1] * worldScale), which leaves the weapon at the height the
+player is really holding their hand at. 64 is Quake's eye height above the
+feet, and MOHAA inherits it.
+
+Yaw is rebased the same way the aim is: the controller's absolute yaw is
+meaningless to the game, so what arrives is how far the hand leads the head and
+the view yaw is added back here.
+
+Returns false when there is no headset, and the caller falls back to the flat
+placement.
+===============
+*/
+static qboolean CG_VRPlaceViewModel(refEntity_t *model)
+{
+    vec3_t offset, angles;
+    float  headHeight = 0.0f;
+    float  worldScale;
+
+    if (!cgi.VR_GetWeaponPose || !cgi.VR_GetWeaponPose(offset, angles, &headHeight)) {
+        return qfalse;
+    }
+
+    worldScale = cgi.Cvar_Get("vr_worldscale", "32", 0)->value;
+    if (worldScale <= 0.0f) {
+        worldScale = 32.0f;
+    }
+
+    VectorAdd(cg.refdef.vieworg, offset, model->origin);
+    model->origin[2] -= 64.0f;
+    model->origin[2] += headHeight * worldScale;
+
+    angles[YAW] = AngleNormalize360(angles[YAW] + cg.refdefViewAngles[YAW]);
+    AnglesToAxis(angles, model->axis);
+
+    return qtrue;
+}
+
 /*
 ===============
 CG_ModelAnim
@@ -1497,8 +1550,27 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
             }
 
             if (!(cg.predicted_player_state.pm_flags & PMF_CAMERA_VIEW)) {
-                if (cg.snap->ps.stats[STAT_HEALTH] > 0 && !cg_animationviewmodel->integer) {
-                    CG_OffsetFirstPersonView(&model, qfalse);
+                //
+                // Added in OPM
+                //
+                //  In VR the weapon belongs in the player's hand, not bolted to
+                //  the middle of the screen. CG_OffsetFirstPersonView places it
+                //  against the camera and adds the walk bob and the landing dip,
+                //  all of which are wrong here: the hand has its own position,
+                //  and shaking the view model when the camera is the player's
+                //  head is a way to make people ill.
+                //
+                //  This is RTCWQuest's CG_CalculateVRWeaponPosition
+                //  (rtcw/src/cgame/cg_weapons.c), which does the same three
+                //  things: put the model at the hand's offset from the head,
+                //  re-base its height so it hangs at the player's real hand
+                //  height rather than at eye level, and rebase its yaw by how
+                //  far the hand leads the head.
+                //
+                if (!CG_VRPlaceViewModel(&model)) {
+                    if (cg.snap->ps.stats[STAT_HEALTH] > 0 && !cg_animationviewmodel->integer) {
+                        CG_OffsetFirstPersonView(&model, qfalse);
+                    }
                 }
 
                 AnglesToAxis(cg.refdefViewAngles, cg.refdef.viewaxis);

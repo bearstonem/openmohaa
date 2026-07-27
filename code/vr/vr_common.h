@@ -148,6 +148,38 @@ typedef struct {
 
 qboolean VR_GetInput(vrInput_t *input);
 
+/*
+Where the weapon hand is pointing, for the game to fire along.
+
+Not an absolute direction. The controller's own yaw is meaningless to the game -
+the player can turn on the spot with the stick, and the play space has an
+arbitrary forward - so what travels is how far the hand *leads the head*, which
+the game then adds to the view yaw it already has. That is what RTCWQuest does
+(rtcw/src/game/g_weapon.c:1904):
+
+	viewang[YAW] = ent->client->ps.viewangles[YAW]
+	             + (gVR->weaponangles[YAW] - gVR->hmdorientation[YAW]);
+
+	out[PITCH]  the controller's pitch, absolute - the head contributes nothing
+	            to it, and blending the two would fight the player's own wrist
+	out[YAW]    degrees the hand leads the head by
+	out[ROLL]   unused; roll does not change a forward vector
+
+False when there is no headset, no tracked weapon hand, or VR is off - the
+caller must keep its existing aim in that case rather than firing at zero.
+*/
+qboolean VR_GetWeaponAim(vec3_t out);
+
+/*
+Where the weapon hand is, for the view model to hang off.
+
+offset is the hand relative to the head, in engine units and the engine's frame.
+angles carry the controller's pitch and roll and, in YAW, how far the hand leads
+the head. headHeight is the head above the floor in metres, so the caller can
+put the weapon at the player's real hand height rather than at eye level.
+*/
+qboolean VR_GetWeaponPose(vec3_t offset, vec3_t angles, float *headHeight);
+
 // How much of the head's heading the client has already written into the game's
 // view angles. The renderer takes it back off before composing the headset onto
 // the game's camera, so the same rotation is not applied twice.

@@ -526,6 +526,23 @@ static struct {
 	cvar_t         *vr_refreshRate;
 	cvar_t         *vr_msaa;
 	cvar_t         *vr_pointerBeam;
+
+	// The weapon hand, composed for the game. Cached rather than recomputed
+	// because the game asks for it from its own tick, not the client's.
+	float           weaponAimPitch;
+	float           weaponAimYawLead;
+	qboolean        weaponAimValid;
+	qboolean        weaponSwitched;
+	vec3_t          weaponOffset;
+	qboolean        weaponOffsetValid;
+	float           weaponRoll;
+	float           headHeight;
+	XrPosef         dummyPose;
+	XrVector3f      handPos[2];
+	qboolean        handPosValid[2];
+	qboolean        stabiliseHeld;
+	qboolean        weaponStabilised;
+	XrAction        stabiliseAction;
 } vr;
 
 static cvar_t *vr_traceTracking;
@@ -556,6 +573,8 @@ static qboolean VR_CheckResult(XrResult result, const char *what)
 	Com_Printf("%s\n", message);
 	return qfalse;
 }
+
+#define VR_STABILISE_DISTANCE 0.5f
 
 #define XR_CHECK(call) VR_CheckResult((call), #call)
 
@@ -1439,7 +1458,9 @@ static void VR_CreateActions(void)
 	XrActionCreateInfo            actionInfo;
 	XrActionSpaceCreateInfo       spaceInfo;
 	XrSessionActionSetsAttachInfo attachInfo;
-	XrActionSuggestedBinding      bindings[16];
+	// Two hands times the sites bound below, with room to add one
+	// without this quietly overflowing.
+	XrActionSuggestedBinding      bindings[32];
 	XrInteractionProfileSuggestedBinding suggested;
 	XrPath                        profile;
 	int                           i;
@@ -1466,6 +1487,16 @@ static void VR_CreateActions(void)
 
 	xrStringToPath(vr.instance, "/user/hand/left", &vr.handPaths[0]);
 	xrStringToPath(vr.instance, "/user/hand/right", &vr.handPaths[1]);
+
+	memset(&actionInfo, 0, sizeof(actionInfo));
+	actionInfo.type = XR_TYPE_ACTION_CREATE_INFO;
+	actionInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+	Q_strncpyz(actionInfo.actionName, "stabilise", sizeof(actionInfo.actionName));
+	Q_strncpyz(actionInfo.localizedActionName, "Steady Weapon", sizeof(actionInfo.localizedActionName));
+
+	if (!XR_CHECK(xrCreateAction(vr.actionSet, &actionInfo, &vr.stabiliseAction))) {
+		return;
+	}
 
 	memset(&actionInfo, 0, sizeof(actionInfo));
 	actionInfo.type = XR_TYPE_ACTION_CREATE_INFO;
@@ -1591,10 +1622,13 @@ static void VR_CreateActions(void)
 					count++;
 				}
 
-				// And on the grips as well, both of them, because reaching for a
-				// door handle with the grip is the thing people try first.
+				// The grips. The off hand's steadies the weapon - bringing the
+				// free hand up to the gun and squeezing is how a rifle is held,
+				// and it is what the reference binds it to. The weapon hand's
+				// keeps use, so reaching for a door handle with the grip still
+				// works with the hand that is already pointing at it.
 				Com_sprintf(path, sizeof(path), "/user/hand/%s/input/squeeze/value", hands[hand]);
-				bindings[count].action = vr.useAction;
+				bindings[count].action = (hand == 0) ? vr.stabiliseAction : vr.useAction;
 				if (XR_SUCCEEDED(xrStringToPath(vr.instance, path, &bindings[count].binding))) {
 					count++;
 				}
@@ -2122,6 +2156,24 @@ void VR_UpdateInput(void)
 	VR_UpdateHeldButton(vr.jumpAction, &vr.jumpWasDown, "+moveup\n", "-moveup\n");
 	VR_UpdateHeldButton(vr.duckAction, &vr.duckWasDown, "+movedown\n", "-movedown\n");
 	VR_UpdateHeldButton(vr.useAction, &vr.useWasDown, "+use\n", "-use\n");
+
+	// Not a command - nothing in the game knows about a two handed hold, it
+	// only changes where the weapon points, so it is read straight into the VR
+	// state and consumed in VR_GetInput.
+	{
+		XrActionStateGetInfo getInfo;
+		XrActionStateBoolean state;
+
+		memset(&getInfo, 0, sizeof(getInfo));
+		getInfo.type = XR_TYPE_ACTION_STATE_GET_INFO;
+		getInfo.action = vr.stabiliseAction;
+
+		memset(&state, 0, sizeof(state));
+		state.type = XR_TYPE_ACTION_STATE_BOOLEAN;
+
+		vr.stabiliseHeld = (XR_SUCCEEDED(xrGetActionStateBoolean(vr.session, &getInfo, &state))
+			&& state.isActive && state.currentState) ? qtrue : qfalse;
+	}
 }
 
 /*
@@ -2202,6 +2254,32 @@ qboolean VR_GetInput(vrInput_t *input)
 		if (fabsf(stick.currentState.x) > fabsf(stick.currentState.y)) {
 			input->turn = stick.currentState.x;
 		}
+
+		// Weapon selection, on the same stick pushed up or down.
+		//
+		// Taken from RTCWQuest (VrInputDefault.c, "Weapon Chooser"): the
+		// dominant thumbstick straight up is weapprev and straight down is
+		// weapnext, gated on the sideways component so it cannot be mistaken
+		// for a turn, and edge triggered so a held stick does not run through
+		// the whole inventory.
+		//
+		// The stick rather than a button because there is no button left - the
+		// triggers fire, both face buttons on each hand are objectives and
+		// jump, and the sticks and grips are duck and use. The reference does
+		// not spend a button on this either.
+		{
+			const float x = stick.currentState.x;
+			const float y = stick.currentState.y;
+
+			if (fabsf(x) < 0.2f && fabsf(y) > 0.8f) {
+				if (!vr.weaponSwitched) {
+					Cbuf_AddText(y > 0.0f ? "weapprev\n" : "weapnext\n");
+					vr.weaponSwitched = qtrue;
+				}
+			} else {
+				vr.weaponSwitched = qfalse;
+			}
+		}
 	}
 
 	// Room scale. The headset's own movement is handed to the game as movement
@@ -2237,6 +2315,9 @@ qboolean VR_GetInput(vrInput_t *input)
 		XrSpaceLocation location;
 		int             hand;
 
+		vr.handPosValid[0] = qfalse;
+		vr.handPosValid[1] = qfalse;
+
 		for (hand = 0; hand < 2; hand++) {
 			vec3_t forward, handAngles;
 
@@ -2249,8 +2330,61 @@ qboolean VR_GetInput(vrInput_t *input)
 				continue;
 			}
 
+			if (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) {
+				vr.handPos[hand] = location.pose.position;
+				vr.handPosValid[hand] = qtrue;
+			}
+
 			VR_AimForward(&location.pose.orientation, forward);
 			vectoangles(forward, handAngles);
+
+			// The hand's position relative to the head, in the engine's frame
+			// and its units. This is what the view model hangs off: the
+			// reference calls it calculated_weaponoffset and adds it to the view
+			// origin (rtcw cg_weapons.c, CG_CalculateVRWeaponPosition).
+			if (hand == 1 && (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+				&& vr.viewsValid) {
+				float  scale = vr.vr_worldscale->value;
+				XrVector3f head;
+				vec3_t off;
+
+				if (scale <= 0.0f) {
+					scale = 32.0f;
+				}
+
+				head.x = (vr.views[0].pose.position.x + vr.views[1].pose.position.x) * 0.5f;
+				head.y = (vr.views[0].pose.position.y + vr.views[1].pose.position.y) * 0.5f;
+				head.z = (vr.views[0].pose.position.z + vr.views[1].pose.position.z) * 0.5f;
+
+				// Same axis mapping as VR_PoseToView: XR is Y up, -Z forward,
+				// metres; the engine is X forward, Y left, Z up, in units.
+				off[0] = -(location.pose.position.z - head.z) * scale;
+				off[1] = -(location.pose.position.x - head.x) * scale;
+				off[2] =  (location.pose.position.y - head.y) * scale;
+
+				// And the same de-rotation, so the offset is expressed against
+				// the character's forward rather than the play space's.
+				if (vr.yawOffset != 0.0f) {
+					const float radians = -vr.yawOffset * (float)M_PI / 180.0f;
+					const float c = cosf(radians);
+					const float sn = sinf(radians);
+					const float x = off[0];
+					const float y = off[1];
+
+					off[0] = x * c - y * sn;
+					off[1] = x * sn + y * c;
+				}
+
+				VectorCopy(off, vr.weaponOffset);
+				vr.weaponOffsetValid = qtrue;
+
+				// Head height above the floor, in metres. The reference adds
+				// this back after dropping the view origin to the feet, so the
+				// weapon sits at the real height of the player's hand rather
+				// than at eye level (cg_weapons.c: origin[2] -= 64; then
+				// += hmdposition[1] * worldScale).
+				vr.headHeight = head.y;
+			}
 
 			if (hand == 0) {
 				input->offhandYaw = handAngles[YAW];
@@ -2259,11 +2393,144 @@ qboolean VR_GetInput(vrInput_t *input)
 				input->weaponYaw = handAngles[YAW];
 				input->weaponPitch = handAngles[PITCH];
 				input->weaponTracked = qtrue;
+
+				// Roll as well, for the view model: a rifle held on its side
+				// should appear on its side. It does not affect where a shot
+				// goes - roll leaves a forward vector alone - which is why the
+				// aim path does without it.
+				//
+				// Taken from the hand's own axes rather than from the forward
+				// vector, which cannot carry roll: vectoangles always returns
+				// zero for it.
+				{
+					XrVector3f  xrUp = { 0.0f, 1.0f, 0.0f };
+					XrVector3f  dir;
+					vec3_t      up, axis[3], full;
+
+					VR_RotateVector(&location.pose.orientation, &xrUp, &dir);
+					up[0] = -dir.z;
+					up[1] = -dir.x;
+					up[2] =  dir.y;
+
+					if (vr.yawOffset != 0.0f) {
+						const float radians = -vr.yawOffset * (float)M_PI / 180.0f;
+						const float c = cosf(radians);
+						const float sn = sinf(radians);
+						const float x = up[0];
+						const float y = up[1];
+
+						up[0] = x * c - y * sn;
+						up[1] = x * sn + y * c;
+					}
+
+					// forward, left, up - the order AnglesToAxis produces and
+					// MatrixToEulerAngles expects.
+					VectorCopy(forward, axis[0]);
+					CrossProduct(up, forward, axis[1]);
+					VectorNormalize(axis[1]);
+					CrossProduct(forward, axis[1], axis[2]);
+					VectorNormalize(axis[2]);
+
+					MatrixToEulerAngles(axis, full);
+					vr.weaponRoll = full[ROLL];
+				}
 			}
+		}
+
+		// Two handed hold. With the off hand brought up to the weapon and its
+		// grip squeezed, the weapon points along the line between the hands
+		// rather than along the weapon hand alone - which is both how a rifle is
+		// actually held and far steadier, because a small wobble at one hand is
+		// damped by the distance to the other.
+		//
+		// From RTCWQuest (VrInputDefault.c): off hand grip held, and the hands
+		// within STABILISATION_DISTANCE of each other. Roll is halved rather
+		// than taken from the line, which carries none.
+		vr.weaponStabilised = qfalse;
+
+		if (vr.stabiliseHeld && vr.handPosValid[0] && vr.handPosValid[1]) {
+			const float dx = vr.handPos[0].x - vr.handPos[1].x;
+			const float dy = vr.handPos[0].y - vr.handPos[1].y;
+			const float dz = vr.handPos[0].z - vr.handPos[1].z;
+			const float apart = sqrtf(dx * dx + dy * dy + dz * dz);
+
+			if (apart < VR_STABILISE_DISTANCE) {
+				const float flat = sqrtf(dx * dx + dz * dz);
+
+				if (flat > 0.0001f) {
+					// Still XR's axes here: Y is up, -Z is forward.
+					input->weaponPitch = -RAD2DEG(atanf(dy / flat));
+					input->weaponYaw   = -RAD2DEG(atan2f(dx, -dz)) - vr.yawOffset;
+					vr.weaponRoll     *= 0.5f;
+					vr.weaponStabilised = qtrue;
+				}
+			}
+		}
+
+		// Kept for the game, which asks for it on its own schedule and from the
+		// other side of the game module boundary. See VR_GetWeaponAim.
+		if (input->weaponTracked) {
+			vr.weaponAimPitch = input->weaponPitch;
+			vr.weaponAimYawLead = AngleSubtract(input->weaponYaw, input->headYaw);
+			vr.weaponAimValid = qtrue;
+		} else {
+			vr.weaponAimValid = qfalse;
 		}
 	}
 
 	input->valid = qtrue;
+	return qtrue;
+}
+
+/*
+==================
+VR_GetWeaponAim
+==================
+*/
+qboolean VR_GetWeaponAim(vec3_t out)
+{
+	if (!vr.enabled || !vr.weaponAimValid) {
+		return qfalse;
+	}
+
+	out[PITCH] = vr.weaponAimPitch;
+	out[YAW]   = vr.weaponAimYawLead;
+	out[ROLL]  = 0.0f;
+	return qtrue;
+}
+
+/*
+==================
+VR_GetWeaponPose
+
+Where to put the view model, so the weapon is in the player's hand.
+
+offset is the hand's position relative to the head, in engine units and the
+engine's frame; the caller adds it to the view origin. angles are the
+controller's, with yaw expressed as how far the hand leads the head - the same
+rebasing the aim uses, and for the same reason.
+
+headHeight is the head's height above the floor in metres. The reference drops
+the view origin to the feet and adds this back, so the weapon hangs at the real
+height of the player's hand instead of at eye level.
+==================
+*/
+qboolean VR_GetWeaponPose(vec3_t offset, vec3_t angles, float *headHeight)
+{
+	if (!vr.enabled || !vr.weaponAimValid || !vr.weaponOffsetValid) {
+		return qfalse;
+	}
+
+	VectorCopy(vr.weaponOffset, offset);
+
+	angles[PITCH] = vr.weaponAimPitch;
+	angles[YAW]   = vr.weaponAimYawLead;
+	angles[ROLL]  = vr.weaponRoll;
+
+	if (headHeight) {
+		*headHeight = vr.headHeight;
+	}
+
 	return qtrue;
 }
 
@@ -2302,6 +2569,11 @@ void VR_DestroySession(void)
 			xrDestroySpace(vr.aimSpaces[i]);
 			vr.aimSpaces[i] = XR_NULL_HANDLE;
 		}
+	}
+
+	if (vr.stabiliseAction != XR_NULL_HANDLE) {
+		xrDestroyAction(vr.stabiliseAction);
+		vr.stabiliseAction = XR_NULL_HANDLE;
 	}
 
 	if (vr.actionSet != XR_NULL_HANDLE) {

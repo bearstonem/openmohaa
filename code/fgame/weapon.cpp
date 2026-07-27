@@ -1233,7 +1233,31 @@ void Weapon::GetMuzzlePosition(vec3_t position, vec3_t vBarrelPos, vec3_t forwar
             player = static_cast<Player *>(owner.Pointer());
 
             if (forward || right || up) {
-                AngleVectors(player->m_vViewAng, forward, right, up);
+                Vector aimAng = player->m_vViewAng;
+                vec3_t vrAim;
+
+                //
+                // Added in OPM
+                //
+                //  In VR the shot follows the weapon hand, not the head. The
+                //  camera stays where the player is looking - moving it to the
+                //  controller would be unusable - so only the trace moves.
+                //
+                //  Pitch comes straight from the controller; the head
+                //  contributes nothing to it, and blending the two would fight
+                //  the player's own wrist. Yaw is the view yaw plus how far the
+                //  hand leads the head, because the controller's absolute yaw
+                //  means nothing to the game: the player can turn on the spot
+                //  with the stick, and the play space has an arbitrary forward.
+                //
+                //  This is what RTCWQuest does, at rtcw/src/game/g_weapon.c:1904.
+                //
+                if (gi.VR_GetWeaponAim && gi.VR_GetWeaponAim(vrAim)) {
+                    aimAng[PITCH] = vrAim[PITCH];
+                    aimAng[YAW]   = AngleNormalize360(aimAng[YAW] + vrAim[YAW]);
+                }
+
+                AngleVectors(aimAng, forward, right, up);
             }
 
             VectorCopy(player->m_vViewPos, position);
