@@ -1179,6 +1179,53 @@ void R_TessellateTerrain()
     R_DoTriMerging();
 }
 
+
+/*
+================
+R_TerrainViewFov
+
+The horizontal field of view the terrain system should size itself against.
+
+In VR this is not tr.refdef.fov_x. The projection comes from the runtime's four
+tangents (R_SetupProjection) and the culling frustum is built from the same
+(R_SetupFrustum), so refdef.fov_x is no longer what is on screen - it is
+whatever the game happened to ask for, around 80 degrees, while a Quest 3 eye
+sees closer to 100.
+
+That matters here because terrain visibility is a cone test. R_MarkTerrainPatch
+rejects any patch further off the view axis than g_fClipDotSquared allows, and
+at fov 80 that half angle is about 46 degrees. Terrain inside the headset's view
+but outside an 80 degree cone is therefore never marked visible, and never
+drawn - silently, because nothing else in the VR path reads fov_x any more.
+
+Taken from the widest of the two horizontal tangents rather than their sum: the
+per-eye frustum is asymmetric, and the cone is symmetric about the view axis, so
+it has to cover the wider side.
+
+MOHAA specific. RTCWQuest has no terrain, so the reference cannot help here.
+================
+*/
+static float R_TerrainViewFov(void)
+{
+    float tanMax;
+
+    if (!vrView.active) {
+        return tr.refdef.fov_x;
+    }
+
+    tanMax = fabs(vrView.tanLeft);
+    if (fabs(vrView.tanRight) > tanMax) {
+        tanMax = fabs(vrView.tanRight);
+    }
+
+    if (tanMax < 0.01f) {
+        return tr.refdef.fov_x;
+    }
+
+    // Full angle, both sides of the axis.
+    return RAD2DEG(atan(tanMax)) * 2.0f;
+}
+
 /*
 ================
 R_TerrainPrepareFrame
@@ -1208,7 +1255,7 @@ void R_TerrainPrepareFrame()
     }
 
     distance = 1.0;
-    fFov     = tr.refdef.fov_x;
+    fFov     = R_TerrainViewFov();
     if (fFov < 1.0) {
         fFov = 1.0;
     }
@@ -1251,7 +1298,18 @@ void R_TerrainPrepareFrame()
     g_fCheck = fCheck;
 
     if (fDistBound != 0.0) {
-        index    = (int)tr.refdef.fov_x;
+        // Clamped, and never zero. These are raw table indices: index 0 gives
+        // g_fDistanceTable[0] = 443.5 / sqrt(1 - 1), which is infinity, and an
+        // infinite distance poisons g_vClipOrigin below and culls every patch
+        // in the level. A fov of zero is not reachable today but nothing here
+        // checked, and the failure is total and silent.
+        index = (int)R_TerrainViewFov();
+        if (index < 1) {
+            index = 1;
+        } else if (index >= TERRAIN_TABLE_SIZE) {
+            index = TERRAIN_TABLE_SIZE - 1;
+        }
+
         distance = g_fDistanceTable[index];
 
         g_fClipDotSquared = g_fClipDotSquaredTable[index];
