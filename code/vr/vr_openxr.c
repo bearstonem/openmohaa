@@ -894,7 +894,11 @@ qboolean VR_Init(void)
 	vr.vr_wristBack = VR_TuningCvar("vr_wristBack", "0.07");
 	// Dumps the left eye to main/vrshotN.tga every two seconds, so what the
 	// renderer produced can be looked at directly instead of described.
-	vr_captureEye = VR_TuningCvar("vr_captureEye", "0");
+	// Deliberately not a VR_TuningCvar. Those force their default at every
+	// start, which is right for a value still being argued with and wrong for a
+	// switch: it made the config's own setting impossible to honour, and cost a
+	// device run finding out.
+	vr_captureEye = Cvar_Get("vr_captureEye", "0", CVAR_ARCHIVE);
 	// How long the weapon hand grip may be held and still count as a tap
 	// for reload. The reference calls this vr_reloadtimeoutms.
 	vr_reloadTapMs = Cvar_Get("vr_reloadTapMs", "400", CVAR_ARCHIVE);
@@ -3963,7 +3967,22 @@ world behind them.
 */
 qboolean VR_UseScreenLayer(void)
 {
-	return (clc.state != CA_ACTIVE) ? qtrue : qfalse;
+	if (clc.state != CA_ACTIVE) {
+		return qtrue;
+	}
+
+	// A menu covering the whole screen belongs on the panel too, even though
+	// the player is technically in the world. The mission briefing is one, and
+	// without this it is drawn as screen space 2D into both eye buffers - which
+	// puts it at the near plane, a hand's width from the player's face, with no
+	// disparity to fuse and each eye warping it through its own asymmetric
+	// frustum. It is exactly the problem the quad layer was built to solve; it
+	// simply was not being reached for anything in-game.
+	if (UI_FullscreenMenuUp()) {
+		return qtrue;
+	}
+
+	return qfalse;
 }
 
 /*

@@ -724,6 +724,11 @@ void	SCR_DrawSmallChar( int x, int y, int ch );
 
 void	UpdateStereoSide( stereoFrame_t s );
 
+// Whether a menu covering the whole screen is up. True during the mission
+// briefing and anything else that takes over the view while the player is
+// still in the world.
+qboolean UI_FullscreenMenuUp( void );
+
 //
 // cl_cin.c
 //

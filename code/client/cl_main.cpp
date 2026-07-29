@@ -2698,8 +2698,47 @@ spawning, and a give aimed at nothing is silently dropped.
 */
 static void CL_RunStartupCommand( void ) {
 	static qboolean	fired;
+	static qboolean	mapFired;
 	static int		activeSince;
+	static int		idleSince;
 	cvar_t			*cmd;
+
+	// Loading the map from autoexec.cfg does not survive: that runs during
+	// Com_Init, and the game's own startup - the intro stages and then the
+	// menu - comes afterwards and tears it down again. So it waits here until
+	// the client is actually sitting at the menu doing nothing.
+	if ( clc.state == CA_DISCONNECTED ) {
+		cvar_t *startMap;
+
+		activeSince = 0;
+		fired = qfalse;
+
+		if ( mapFired ) {
+			return;
+		}
+
+		if ( !idleSince ) {
+			idleSince = cls.realtime;
+			return;
+		}
+
+		// Long enough for the intro stages to have finished handing the client
+		// around; starting a map underneath them leaves the menu on top of it.
+		if ( cls.realtime - idleSince < 4000 ) {
+			return;
+		}
+
+		startMap = Cvar_Get( "vr_startMap", "", CVAR_TEMP );
+		mapFired = qtrue;
+
+		if ( startMap && startMap->string[0] ) {
+			Com_Printf( "vr_startMap: %s\n", startMap->string );
+			Cbuf_AddText( va( "map %s\n", startMap->string ) );
+		}
+		return;
+	}
+
+	idleSince = 0;
 
 	if ( clc.state != CA_ACTIVE ) {
 		// Armed again for the next map, so this works on every load rather
@@ -2725,8 +2764,12 @@ static void CL_RunStartupCommand( void ) {
 	cmd = Cvar_Get( "vr_testStart", "", CVAR_TEMP );
 	fired = qtrue;
 
+	// Printed either way. A hook that silently does nothing is indistinguishable
+	// from one that never ran, and telling those apart has cost enough already.
+	Com_Printf( "vr_testStart: in world, command is \"%s\"\n",
+		( cmd && cmd->string[0] ) ? cmd->string : "" );
+
 	if ( cmd && cmd->string[0] ) {
-		Com_Printf( "vr_testStart: %s\n", cmd->string );
 		Cbuf_AddText( va( "%s\n", cmd->string ) );
 	}
 }
