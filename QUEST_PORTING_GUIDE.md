@@ -801,6 +801,66 @@ the head at 0.5 game units from the eye — **inside the 1.0 near clip**, so the
 hands were culled and invisible. It is now 100. It also sets how far a physical
 lean moves you, and only the headset can settle that.
 
+**But look it up before tuning it — for an old engine it is a fact, not a feel
+value.** OpenMoHAA ran at 32 units to the metre for months, which is roughly the
+id Tech number for a game built in inches and simply the wrong engine's. MOHAA's
+own art states its scale where the tik files convert from centimetres:
+
+```
+scale 0.52   // 16/30.5 since world is in 16 units per foot
+```
+
+16 / 0.3048 = **52.5 units per metre**, and the player dimensions agree —
+`MAXS_Z 94` and `DEFAULT_VIEWHEIGHT 82` come to 1.79 m standing and 1.56 m to the
+eye. Two places to find it in any engine: an asset-pipeline comment like the
+above, and the player's own bounding box divided by a plausible human.
+
+Getting it wrong by a factor of 1.64 does not look like a scale error. It looks
+like **the hands and weapon are too large**, because a hand held half a metre out
+gets placed at 16 units instead of 26 while the hand *model* is authored at the
+game's true scale — so a correctly sized model is drawn far too close and reads
+as oversized. The world itself gives you nothing to compare against; your own
+hands do.
+
+### 4.8.1 The engine's camera variable is probably not the camera
+
+The single most expensive lesson of the OpenMoHAA hand work, and it generalises
+to anything gameplay code positions in the world: **once the head pose is applied
+low in the render path (§4.8), the variable game code reads as "the camera" is no
+longer where the camera ends up.**
+
+In id Tech the renderer composes the real camera itself:
+
+```c
+bodyAngles = (0, viewYaw - baseYaw, 0);          // body frame: stick heading only
+fd->vieworg += vrView.origin[i] * bodyAxis[i];    // head's play-space offset
+```
+
+so the camera is `refdef.vieworg` **plus the head's offset within the play space**,
+and the game module never sees that second term. Anchor anything on `vieworg`
+alone and it is displaced by exactly that offset. The symptoms are specific
+enough to diagnose from:
+
+- **it drifts when you rotate your head** — the head swings about the neck, so
+  looking around moves its position in the play space by 10–15 cm;
+- **a snap turn leaves it behind** — a stick turn moves the body frame, and an
+  offset that was never rotated into that frame does not come with it;
+- **it moves too much** — if a head-*relative* offset is composed as though it
+  were play-space, the object lands at `vieworg + R·(hand − head)` while the
+  camera is at `vieworg + R·head`, so the head's own motion is counted twice and
+  every movement is amplified.
+
+There are two correct routes and they are equivalent. RTCWQuest keeps the offset
+head-relative and rotates it in `convertFromVR` (`rotateAboutOrigin(..., viewYaw
+− hmdYaw)`), then replaces its height with `origin[2] -= 64; origin[2] +=
+hmdposition[1] * worldScale`. OpenMoHAA measures from the **tracking origin** —
+the same frame the eyes are in — and composes once. Either works.
+
+> **What must never happen is half of each.** That is the third symptom above,
+> and it is what a partly-completed refactor produces. Both accessors take
+> `(vec3_t, vec3_t, float*)`, so changing what the arguments *mean* while leaving
+> one caller behind compiles silently. See §9.4.
+
 ### 4.9 Render resolution, and restarts that destroy the session
 
 **Do not set the render resolution through cvars.** In OpenMoHAA, `r_mode` is
@@ -1000,6 +1060,54 @@ weapon (`vr_weapon_adjustment_<id>`); OpenMoHAA carries the same as
 `vr_weaponAdjust`. Build a way to tune it **without replaying the level** — a cvar
 read live, and a test hook that starts the map and grants weapons after a delay,
 is worth the hour it takes.
+
+The adjustment string both ports use is `scale,right,up,forward,pitch,yaw,roll`.
+**The first field is the model's scale, not the offset's** — RTCWQuest writes it
+into `test_scale` and returns it as the entity scale. Scaling only the offset
+with it, as OpenMoHAA did at first, leaves a knob that appears to do nothing to a
+model that is the wrong size. If the model is anchored on a tag (below), apply
+the scale *before* asking for the tag: `TIKI_Orientation` multiplies the tag's
+origin by the entity scale, so scaling afterwards moves the anchor.
+
+### 6.4.1 Anchor on the hand, not on the model origin
+
+A first-person model's origin is not its hand. Place the model origin at the
+controller and the hand sits wherever the animation put it — for a rifle pose,
+well out in front. So move the model such that a chosen **tag or bone** lands on
+the controller instead, by inverting the composition the engine already uses
+(id Tech: `Entity::GetTagPositionAndOrientation`):
+
+```
+world.origin = model.origin + tag.origin through model.axis
+world.axis   = tag.axis composed with model.axis
+```
+
+which inverts to `model.axis = transpose(tag.axis) * handAxis`, then
+`model.origin = handOrigin − tag.origin projected through model.axis`. An
+orientation's axes are orthonormal, so undoing the rotation is a transpose.
+
+Pick the anchor per hand and per purpose. The off hand wants its **bone**
+(`Bip01 L Hand`) because the hand is the thing being placed; the weapon hand
+wants the **weapon's attachment tag** (`tag_weapon_right`) because what the
+player is holding is the gun and the controller is its grip.
+
+> **A tag existing does not mean it is where you think.** Measure every candidate
+> and log how far it sits from the model origin — an anchor a fraction of a unit
+> out is an unused slot, however cleanly it resolved, and anchoring on it cancels
+> nothing while looking exactly like no anchoring at all. In OpenMoHAA this was
+> assumed about `tag_weapon_left` and the assumption was **wrong** — it is a real
+> anchor 23.5 units out. The measurement cost four lines; the guess would have
+> cost a redesign.
+
+Two symptoms tell the anchoring apart from the frame errors in §4.8.1: a bad
+anchor gives a **constant** offset that tracks 1:1, while a bad frame gives an
+offset that **changes as you move**.
+
+What is left after both are right is the bone's own rotation convention — a wrist
+bone's local axes do not run the way a controller is held, so the mesh inherits a
+constant twist, usually a half turn. That is what the `pitch,yaw,roll` fields are
+for, and it is the one thing in the chain that can only be found in the headset.
+Mirrored bones need not take the same sign.
 
 ### 6.5 Gestures, and the button budget
 
@@ -1379,6 +1487,29 @@ Two consequences:
   nothing. **Read the stored config before believing a negative result** —
   `adb pull .../files/main/configs/omconfig.cfg`.
 
+Two more, both learned the hard way on the same file:
+
+- **A change to a `CVAR_ARCHIVE` default needs the config pushed too.** Correcting
+  `vr_worldscale` in code did nothing on a device that had run before, because the
+  stored value won — exactly as the first bullet says, and still easy to forget
+  when the change *feels* like a code fix rather than a config one.
+- **Nothing in the config survives if the harness itself never fires.** See below.
+
+**Build a way to load a map without touching a menu**, and expect it to be
+fiddlier than it sounds. A map loaded from the config runs during `Com_Init` and
+the engine's own startup tears it straight back down, so it has to wait until the
+client is idle — and *what counts as idle is not obvious*. OpenMoHAA waited on
+`CA_DISCONNECTED` and the map never loaded, because id Tech's main menu is drawn
+over a static image and the enum says what that means:
+
+```c
+CA_CINEMATIC   // playing a cinematic or a static pic, not connected to a server
+```
+
+The client sits in `CA_CINEMATIC` at the menu, so the idle timer was cleared every
+frame and could never accumulate. Accept both states. And print which one let it
+through (§9.4.1) — that one number settled it immediately once it existed.
+
 ### 9.2 Before believing any negative rendering result, prove the renderer can draw at all
 
 **Every engine-side experiment run before §8.5 was worthless, because gl4es could
@@ -1427,6 +1558,58 @@ disabling culling was doing.
 
 **Grep for the symbol after editing**, or read the warning log. A cvar that reads
 nothing looks exactly like a cvar that changes nothing.
+
+The nastier version is a change you *believe* you made. During the OpenMoHAA hand
+work, one of two accessors was converted to a new coordinate frame and the other
+was left behind — while the caller of both moved to the new convention. Both are
+
+```c
+qboolean VR_GetWeaponPose(vec3_t, vec3_t, float *);
+qboolean VR_GetHandPose(int, vec3_t, vec3_t, float *);
+```
+
+so **only the meaning of the arguments changed, and C cannot see that.** No
+warning, no error, and a symptom (one hand amplified, the other perfect) that
+reads as a maths problem rather than a half-finished edit. It cost a device round
+trip and was found by reading the function rather than trusting the memory of
+having changed it.
+
+> When a refactor changes what a value *means* rather than its type, the compiler
+> is not going to help. Grep every caller, and if the meaning is subtle put it in
+> the header where the next person has to read it.
+
+### 9.4.1 Make silent paths speak
+
+Twice in one session an early return with no output cost a full build-and-deploy
+cycle, because "did nothing" and "never ran" produce the same empty log:
+
+- `vr_startMap` printed only on success, so its silence could not be told from
+  "ran with an empty cvar". The `vr_testStart` branch three lines below already
+  printed either way, with a comment explaining exactly why — the lesson had been
+  learned and then not applied to the neighbouring function.
+- a tag lookup returned `-1` on a failed precondition without saying which, and
+  the resulting un-anchored model looked identical to a model anchored on
+  something that happened to sit at the origin.
+
+**Print on every exit from a diagnostic path, including the boring one, and name
+the state that decided it.** `"idle in state %d, map is \"%s\""` answers three
+questions at once; `"loading %s"` answers none of them when it does not appear.
+
+### 9.4.2 On-device logs rotate, so capture before you run
+
+A Quest's logcat buffer is shared with a shell that prints a refresh-rate line
+every five seconds, so a once-only startup message can be gone within a minute or
+two. Twice the answer was already printed and already lost.
+
+Start the capture *before* handing the headset over:
+
+```sh
+adb logcat -c
+adb logcat -s <tag>:V > run.log &
+```
+
+Cheaper than another round trip, and it survives the sleep/wake disconnects that
+kill an interactive `adb logcat` anyway (§3.3).
 
 ### 9.5 Single runs are not evidence
 
@@ -1520,24 +1703,30 @@ Ordered by how much time each cost, worst first.
 
 1. **gl4es built with the wrong flags renders nothing** while clearing correctly (§8.5).
 2. **gl4es's cached state drifts from the driver's** and the engine can never correct it (§8.2, §8.7).
-3. **A window-resize `vid_restart` destroys the GL context and OpenXR session mid-run** (§4.9).
-4. **`CACHE INTERNAL` implies `FORCE`** — your `-D` never applied (§2.3).
-5. **`adb shell mkdir` directories are owned by `shell`**, and the app is `other` there (§3.2).
-6. **Linear swapchain format double gamma-encodes** a display-referred renderer (§4.4).
-7. **SDL unbinds the EGL context and reports success** when there is no window surface (§4.2).
-8. **Off-centre frustum sign is handedness-dependent**; either eye alone looks fine (§4.7).
-9. **32-bit indices written through a 16-bit array** after `glIndex_t` changes (§2.6).
-10. **`adb install -r` does not kill the running process** — you test the old build (§3.1).
-11. **Gradle packages a stale `.so`** and reports success (§3.4).
-12. **`am start` strands the headset on the Meta interstitial** while the app runs fine (§3.1).
-13. **Only one process may hold an OpenXR session**; the second falls back to flat, silently (§4.3).
-14. **`xrSyncActions` succeeds but reports nothing** when not `FOCUSED` (§6.1).
-15. **One bad binding path rejects the whole profile suggestion** (§6.1).
-16. **Off-hand steering with the wrong sign mirrors rather than offsets** (§6.2).
-17. **Frustum culling against the game's symmetric fov** clips the edges of an asymmetric one (§4.7).
-18. **`grep` declines on non-UTF-8 sources and reports no matches** (§9.7).
-19. **A swapchain rotates 3 images**, so incremental 2D drawing flickers (§4.4).
-20. **`-Wno-implicit-function-declaration` hides a missing header** (§2.6).
+3. **The engine's camera variable is not the camera** once the head pose is applied in the renderer — anything gameplay code places drifts on head turns, lags snap turns, or moves at double rate (§4.8.1).
+4. **A refactor that changes what an argument *means* compiles silently**, so half-converted callers produce a symptom that reads as bad maths (§9.4).
+5. **World scale is the engine's own number, not a feel value** — get it wrong and the hands read as oversized while the world looks fine (§4.8).
+6. **A model origin is not its hand**; anchor on a tag, and measure every candidate rather than trusting that it resolved (§6.4.1).
+7. **A window-resize `vid_restart` destroys the GL context and OpenXR session mid-run** (§4.9).
+8. **`CACHE INTERNAL` implies `FORCE`** — your `-D` never applied (§2.3).
+9. **`adb shell mkdir` directories are owned by `shell`**, and the app is `other` there (§3.2).
+10. **Linear swapchain format double gamma-encodes** a display-referred renderer (§4.4).
+11. **SDL unbinds the EGL context and reports success** when there is no window surface (§4.2).
+12. **Off-centre frustum sign is handedness-dependent**; either eye alone looks fine (§4.7).
+13. **32-bit indices written through a 16-bit array** after `glIndex_t` changes (§2.6).
+14. **`adb install -r` does not kill the running process** — you test the old build (§3.1).
+15. **Gradle packages a stale `.so`** and reports success (§3.4).
+16. **`am start` strands the headset on the Meta interstitial** while the app runs fine (§3.1).
+17. **Only one process may hold an OpenXR session**; the second falls back to flat, silently (§4.3).
+18. **`xrSyncActions` succeeds but reports nothing** when not `FOCUSED` (§6.1).
+19. **One bad binding path rejects the whole profile suggestion** (§6.1).
+20. **Off-hand steering with the wrong sign mirrors rather than offsets** (§6.2).
+21. **Frustum culling against the game's symmetric fov** clips the edges of an asymmetric one (§4.7).
+22. **`grep` declines on non-UTF-8 sources and reports no matches** (§9.7).
+23. **A swapchain rotates 3 images**, so incremental 2D drawing flickers (§4.4).
+24. **`-Wno-implicit-function-declaration` hides a missing header** (§2.6).
+25. **The menu is `CA_CINEMATIC`, not `CA_DISCONNECTED`**, so an idle-wait that only accepts the latter never fires (§9.1).
+26. **A silent early return reads as "never ran"**, and on-device logs rotate away the once-only line that would have said otherwise (§9.4.1, §9.4.2).
 
 ## Appendix B — numbers, for calibration
 
