@@ -91,9 +91,14 @@ is the only way to set a cvar on a device with no console: exec'd after
 renderer's own defaults. It cannot reach `VR_TuningCvar` cvars, which force their
 value at every start.
 
-It currently ships the test harness **on**: `cheats 1`, `vr_testStart "give all"`
-and `vr_startMap "m4l1"`, which drops straight into The Bocage with every weapon.
-Clear all three to play the game properly.
+The test harness in it ships **off**, so the game starts at its own menu. Filling
+in `cheats 1`, `vr_testStart "give all"` and `vr_startMap "m4l1"` drops straight
+into The Bocage with every weapon, which is how the hands were tuned; the values
+and the reasoning for that map are kept in the comments beside them.
+
+Nothing the game needs to be correct is only in this file. It is a tuning and
+testing knob — the defaults compiled into the build are the values measured on
+device, so an APK installed without it still behaves.
 
 ---
 
@@ -229,7 +234,9 @@ at the origin and is a real anchor 23.5 units out.
 
 What is left after the frame and the anchor are right is the wrist bones' own
 rotation convention, which is a constant: both hands need a roll of 180 in
-`vr_weaponAdjust` / `vr_offHandAdjust`.
+`vr_weaponAdjust` / `vr_offHandAdjust`. That is the compiled default for both,
+not something the config has to supply — the two hands are mirrored and were
+still measured to want the same number, which is why they stay two cvars.
 
 **Two handed hold**: off hand grip with the hands close together points the
 weapon along the line between them, roll halved. **Reload** is a tap of the
