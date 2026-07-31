@@ -262,16 +262,35 @@ that every crash reported four frames of the handler and nothing else.
 
 ## 4. Known problems
 
-**Rendering at 36% of the available pixels.** `vr_resolutionScale` is still
-**0.6**, giving 1008×1056 per eye against a native 1680×1760. That was a
-debugging measure from when the frame cost 50–60 ms per eye; the back end now
-costs 4–6. It is a `VR_TuningCvar`, so autoexec cannot reach it — the default in
-`vr_openxr.c` has to change. **This is the largest cheap win left.**
+**It does not hold 90 Hz while moving.** `vr_resolutionScale` is now 1, so the
+eyes render at the full 1680×1760, and the frame budget is spent:
 
-**MSAA is wired up and switched off** (`vr_samples 0`). It resolves in tile
-memory on Adreno so it costs close to nothing, and aliasing is far more
-objectionable in a headset than on a monitor. Another measurement to make now
-there is budget.
+| | fps | eye pass |
+|---|---|---|
+| standing at spawn | 90.0 | 8–9 ms |
+| moving in the Bocage | 77–85 | 11–12 ms |
+
+The display period is 11.1 ms, so while moving most frames overshoot it and the
+compositor reprojects them. **Kept deliberately** — it plays well, the picture is
+much sharper, and the reprojection is not felt. But it is a known trade rather
+than headroom, and `vr_resolutionScale` is the first thing to give back if
+something later needs the time.
+
+**There is no budget for MSAA.** It is wired up and switched off (`vr_samples 0`)
+and it resolves in tile memory on Adreno so it is nearly free on the GPU — but
+the GPU is not the constraint, and there is nothing spare on the CPU side. This
+stays off until the frame split below is trustworthy.
+
+**The frame split cannot be taken at face value.** It reports `world 1ms` against
+`hud 5ms`, which is not credible for a full world render. `Set2DWindow` begins
+with `R_IssuePendingRenderCommands()`, so the world's deferred draw calls are
+attributed to the first 2D call that forces them out — the trap in
+`QUEST_PORTING_GUIDE.md` §7.1. The one trustworthy figure is `gpuwait`, still
+**3 ms**: the GPU finishes early and waits, exactly as it did under rend2, so
+whatever the 11 ms is, it is CPU issuing draw calls and not fill rate.
+
+**Fixing that attribution is the prerequisite to spending any budget**, because
+right now nobody can say where half the frame goes.
 
 **The HUD is still screen space during gameplay**, with the same non-convergence
 the menus had before the quad layer.
@@ -303,9 +322,13 @@ Establish which faults are background noise before bisecting anything.
 
 ## 5. What to do next
 
-1. **`vr_resolutionScale` back to 1**, then measure. The frame budget that
-   justified 0.6 no longer exists.
-2. **Try MSAA** at 2× and 4× against that measurement.
+1. **Fix the frame split**, so `world` and `hud` mean what they say. Half the
+   frame is currently attributed to a flush rather than to the work that caused
+   it, and every performance decision after this one depends on knowing where
+   the 11 ms actually goes. The GPU idling at 3 ms says there is something real
+   to find.
+2. **Then decide about MSAA**, and about whether the CPU cost can come down far
+   enough to hold 90 Hz at full resolution rather than reprojecting to it.
 3. **Confirm the unconfirmed** — the two handed hold, the reload tap, off hand
    steering. All three are one session on the device with the harness already in
    place.
