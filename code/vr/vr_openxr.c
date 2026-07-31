@@ -864,7 +864,22 @@ qboolean VR_Init(void)
 
 	memset(&vr, 0, sizeof(vr));
 
-	vr.vr_worldscale = Cvar_Get("vr_worldscale", "32", CVAR_ARCHIVE);
+	// 52.5 units to the metre, which is this game's own scale rather than a feel
+	// value. The art is authored at 16 units per foot - MOHAA's tik files say so
+	// where they convert from centimetres, e.g. models/weapons/bar.tik:
+	//
+	//     scale 0.52  // 16/30.5 since world is in 16 units per foot
+	//
+	// 16 / 0.3048 = 52.5, and the player dimensions agree: MAXS_Z 94 and
+	// DEFAULT_VIEWHEIGHT 82 come to 1.79 m standing and 1.56 m to the eye.
+	//
+	// It was 32, which is the id Tech default for a game built in inches and is
+	// simply the wrong engine's number. Everything measured in metres and handed
+	// to the game was therefore 52.5/32 = 1.64 times too small - so a hand half a
+	// metre out was placed at 16 units instead of 26, while the hand *model* is
+	// authored at the game's true scale, and a model that size seen from that
+	// close reads as far too large. Which is how this was noticed.
+	vr.vr_worldscale = Cvar_Get("vr_worldscale", "52.5", CVAR_ARCHIVE);
 	vr.vr_screenDistance = Cvar_Get("vr_screenDistance", "2.5", CVAR_ARCHIVE);
 	vr.vr_screenSize = Cvar_Get("vr_screenSize", "3.0", CVAR_ARCHIVE);
 	vr.vr_refreshRate = Cvar_Get("vr_refreshRate", "90", CVAR_ARCHIVE);
@@ -2483,7 +2498,7 @@ qboolean VR_GetInput(vrInput_t *input)
 				vec3_t off;
 
 				if (scale <= 0.0f) {
-					scale = 32.0f;
+					scale = 52.5f;
 				}
 
 				head.x = (vr.views[0].pose.position.x + vr.views[1].pose.position.x) * 0.5f;
@@ -2949,7 +2964,7 @@ static void VR_PoseToView(const XrPosef *pose, vrEyeView_t *view)
 	float  m[3][3];
 
 	if (scale <= 0.0f) {
-		scale = 32.0f;
+		scale = 52.5f;
 	}
 
 	view->origin[0] = -(pose->position.z - vr.trackingOrigin.z) * scale;

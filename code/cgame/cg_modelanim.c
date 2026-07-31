@@ -1211,6 +1211,23 @@ static qboolean CG_VRPlaceViewModel(refEntity_t *model)
                 &adjustAng[PITCH], &adjustAng[YAW], &adjustAng[ROLL]);
         }
 
+        //
+        //  The first field is the model's scale, not just the offset's. That is
+        //  what it is called and what the reference does with it
+        //  (VrInputWeaponAlign.c writes it into test_scale, and cg_weapons.c
+        //  returns it as the entity scale) - here it was only ever scaling the
+        //  offset, which made it a knob that appeared to do nothing to a model
+        //  that was the wrong size.
+        //
+        //  Applied before anything asks for a tag, because TIKI_Orientation
+        //  multiplies the tag's origin by the entity scale. Anchoring first and
+        //  scaling afterwards would move the hand off the controller by however
+        //  much the scale changed.
+        //
+        if (adjustScale > 0.0f) {
+            model->scale *= adjustScale;
+        }
+
         VectorScale(off, adjustScale, off);
 
         AnglesToAxis(angles, baseAxis);
@@ -1326,6 +1343,23 @@ static qboolean CG_VRPlaceOffHandModel(refEntity_t *model)
             sscanf(adjust->string, "%f,%f,%f,%f,%f,%f,%f",
                 &adjustScale, &off[0], &off[1], &off[2],
                 &adjustAng[PITCH], &adjustAng[YAW], &adjustAng[ROLL]);
+        }
+
+        //
+        //  The first field is the model's scale, not just the offset's. That is
+        //  what it is called and what the reference does with it
+        //  (VrInputWeaponAlign.c writes it into test_scale, and cg_weapons.c
+        //  returns it as the entity scale) - here it was only ever scaling the
+        //  offset, which made it a knob that appeared to do nothing to a model
+        //  that was the wrong size.
+        //
+        //  Applied before anything asks for a tag, because TIKI_Orientation
+        //  multiplies the tag's origin by the entity scale. Anchoring first and
+        //  scaling afterwards would move the hand off the controller by however
+        //  much the scale changed.
+        //
+        if (adjustScale > 0.0f) {
+            model->scale *= adjustScale;
         }
 
         VectorScale(off, adjustScale, off);
