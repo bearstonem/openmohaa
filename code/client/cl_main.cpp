@@ -2707,7 +2707,14 @@ static void CL_RunStartupCommand( void ) {
 	// Com_Init, and the game's own startup - the intro stages and then the
 	// menu - comes afterwards and tears it down again. So it waits here until
 	// the client is actually sitting at the menu doing nothing.
-	if ( clc.state == CA_DISCONNECTED ) {
+	//
+	// CA_CINEMATIC counts as sitting at the menu. This is not obvious and it
+	// cost a launch: the enum reads "playing a cinematic or a static pic, not
+	// connected to a server", and MOHAA's main menu is drawn over a static pic -
+	// so the client is CA_CINEMATIC there, never CA_DISCONNECTED. Waiting only
+	// on the latter meant idleSince was cleared every frame the menu was up and
+	// the wait below could never accumulate, so the map simply never loaded.
+	if ( clc.state == CA_DISCONNECTED || clc.state == CA_CINEMATIC ) {
 		cvar_t *startMap;
 
 		activeSince = 0;
@@ -2731,8 +2738,14 @@ static void CL_RunStartupCommand( void ) {
 		startMap = Cvar_Get( "vr_startMap", "", CVAR_TEMP );
 		mapFired = qtrue;
 
+		// Printed either way, and with the state that let it through, for the
+		// same reason vr_testStart below prints either way: a hook that silently
+		// does nothing looks exactly like one that never ran, and telling those
+		// two apart is the whole cost of a device round trip.
+		Com_Printf( "vr_startMap: idle in state %d, map is \"%s\"\n",
+			(int)clc.state, ( startMap && startMap->string[0] ) ? startMap->string : "" );
+
 		if ( startMap && startMap->string[0] ) {
-			Com_Printf( "vr_startMap: %s\n", startMap->string );
 			Cbuf_AddText( va( "map %s\n", startMap->string ) );
 		}
 		return;
