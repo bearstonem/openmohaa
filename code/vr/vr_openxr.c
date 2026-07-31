@@ -1170,6 +1170,56 @@ static void VR_InitMultisampling(void)
 
 /*
 ==================
+VR_InitColorSpace
+
+The swapchains are GL_SRGB8_ALPHA8, which tells the compositor the images
+already hold display ready colour and to pass them through rather than encode
+them again. That is the right declaration: this engine's output is display
+referred - the same values a monitor would have been handed in 2002 - and
+declaring the images linear makes the compositor gamma encode them a second
+time.
+
+What the declaration does not do on its own is stop GL encoding on the way *in*.
+ES 3.0 converts linear to sRGB on every write into an sRGB attachment, blits
+included, and core ES has no state to turn that off - GL_EXT_sRGB_write_control
+is what adds the switch, and it defaults to on. So the format alone leaves the
+colour encoded once by the driver and passed straight through by the compositor,
+which is the same lifted mid tones as declaring the images linear, arrived at
+from the other side. The format line looks like the fix and is only half of it.
+
+The tell is that it moves the whole scene by one curve: shadowed faces come up
+towards lit ones everywhere at once, which reads as flat lighting rather than as
+a colour fault. One model looking wrong is normals; the entire scene looking
+wrong is the pipeline.
+
+Measured on the Homeworld port, where the same defect arrived by the linear
+route: a mid tone the data puts at 0.19 came out at 0.45, against 0.473 for a
+straight sRGB encode of it, and the ratio between the brightest and darkest
+tenth of a hull collapsed from about 5:1 to 1.76:1.
+==================
+*/
+static void VR_InitColorSpace(void)
+{
+	const char *extensionList = (const char *)glGetString(GL_EXTENSIONS);
+
+	if (!extensionList || !strstr(extensionList, "GL_EXT_sRGB_write_control")) {
+		Com_Printf("OpenXR: no GL_EXT_sRGB_write_control, so the driver encodes every "
+			"write into the sRGB swapchain and the picture will be washed out\n");
+		return;
+	}
+
+	// Deliberately not routed through gl4es. gl4es keeps no copy of this enable,
+	// so there is nothing for it to cache and nothing for it to drop, and it
+	// never sets the state itself - disabling it once here therefore holds for
+	// the whole run, including everything the engine draws through gl4es.
+	glDisable(GL_FRAMEBUFFER_SRGB_EXT);
+
+	Com_Printf("OpenXR: sRGB write conversion off, so the engine's colour reaches the "
+		"swapchain unencoded\n");
+}
+
+/*
+==================
 VR_CreateSwapchain
 
 One swapchain per eye, each image wrapped in a framebuffer with its own depth
@@ -1391,6 +1441,7 @@ void VR_CreateSession(void)
 	XR_CHECK(xrCreateReferenceSpace(vr.session, &spaceInfo, &vr.viewSpace));
 
 	VR_InitMultisampling();
+	VR_InitColorSpace();
 
 	// Two attempts: a driver that advertises the extension can still refuse the
 	// combination of formats, and losing VR over an image quality setting would
