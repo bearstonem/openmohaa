@@ -1199,7 +1199,20 @@ static qboolean CG_VRPlaceViewModel(refEntity_t *model)
     // sit in the wrong place: the two have to be done in that order.
     //
     {
-        cvar_t *adjust = cgi.Cvar_Get("vr_weaponAdjust", "1,0,0,0,0,0,0", CVAR_ARCHIVE);
+        //
+        //  The roll defaults to 180 because that is what the model needs, not
+        //  because it is a nice starting point. Anchoring forces the *bone* to
+        //  take the controller's orientation, and a wrist bone's local axes do
+        //  not run the way a controller is held - the mesh inherits that
+        //  mismatch as a constant half turn about the aim axis, which reads as
+        //  the gun being upside down.
+        //
+        //  It lives here rather than only in misc/android/autoexec.cfg because
+        //  that file is not packaged into the APK - it goes next to the game
+        //  data. A default of zero here means anyone who installs the build
+        //  without also pushing that config gets the wrong answer.
+        //
+        cvar_t *adjust = cgi.Cvar_Get("vr_weaponAdjust", "1,0,0,0,0,0,180", CVAR_ARCHIVE);
         vec3_t  off = {0.0f, 0.0f, 0.0f};
         vec3_t  adjustAng = {0.0f, 0.0f, 0.0f};
         float   adjustScale = 1.0f;
@@ -1333,7 +1346,12 @@ static qboolean CG_VRPlaceOffHandModel(refEntity_t *model)
     angles[YAW] = AngleNormalize360(angles[YAW] + cg.refdefViewAngles[YAW]);
 
     {
-        cvar_t *adjust = cgi.Cvar_Get("vr_offHandAdjust", "1,0,0,0,0,0,0", CVAR_ARCHIVE);
+        //
+        //  180 for the same reason as the weapon hand, and measured to be the
+        //  same number despite the two hands being mirrored - which was not a
+        //  given, and is why this is its own cvar rather than a shared one.
+        //
+        cvar_t *adjust = cgi.Cvar_Get("vr_offHandAdjust", "1,0,0,0,0,0,180", CVAR_ARCHIVE);
         vec3_t  off = {0.0f, 0.0f, 0.0f};
         vec3_t  adjustAng = {0.0f, 0.0f, 0.0f};
         float   adjustScale = 1.0f;
