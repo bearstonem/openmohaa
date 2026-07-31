@@ -453,7 +453,19 @@ functions exported to the main executable
          * False when there is no headset or the hand is untracked, in which
          * case the caller keeps the placement it had.
          */
-        qboolean (*VR_GetWeaponPose)(vec3_t offset, vec3_t angles, float *headHeight);
+        qboolean (*VR_GetWeaponPose)(vec3_t trackingOffset, vec3_t angles, float *baseYaw);
+
+        /**
+         * @brief Where one controller is, for a hand to be drawn on it.
+         *
+         * hand is 0 for the left and 1 for the right. Same frame, units and
+         * conventions as VR_GetWeaponPose, but the bare hand pose - none of
+         * what the weapon does to its own aim is folded in.
+         *
+         * False when there is no headset or that hand is untracked, in which
+         * case the caller should not draw that hand at all.
+         */
+        qboolean (*VR_GetHandPose)(int hand, vec3_t trackingOffset, vec3_t angles, float *baseYaw);
 
         cvar_t       *fsDebug;
         hdelement_t  *HudDrawElements;

@@ -540,6 +540,26 @@ static struct {
 	XrPosef         dummyPose;
 	XrVector3f      handPos[2];
 	qboolean        handPosValid[2];
+
+	// Both hands, in the same convention VR_GetWeaponPose reports the weapon
+	// hand in: offset from the head in engine units and the engine's frame,
+	// pitch and roll absolute, yaw as how far the hand leads the head. The
+	// weapon hand's entries are the raw pose, before the two handed hold and the
+	// per weapon adjustment have had their say - those belong to the weapon, not
+	// to the hand it happens to be held in.
+	vec3_t          handOffset[2];
+	qboolean        handOffsetValid[2];
+
+	// The hand in the play space, measured from the tracking origin in engine
+	// units - the very frame VR_PoseToView puts the eyes in, and therefore the
+	// frame the renderer's vrView.origin is in. Anything that has to end up in
+	// the same place as the camera has to be built from this rather than from a
+	// head-relative offset, because the renderer adds the head's play space
+	// offset to the game's camera itself and cgame never sees it.
+	vec3_t          handTracking[2];
+	float           handPitch[2];
+	float           handYawLead[2];
+	float           handRoll[2];
 	qboolean        stabiliseHeld;
 	qboolean        weaponStabilised;
 	XrAction        stabiliseAction;
@@ -2429,6 +2449,8 @@ qboolean VR_GetInput(vrInput_t *input)
 
 		vr.handPosValid[0] = qfalse;
 		vr.handPosValid[1] = qfalse;
+		vr.handOffsetValid[0] = qfalse;
+		vr.handOffsetValid[1] = qfalse;
 
 		for (hand = 0; hand < 2; hand++) {
 			vec3_t forward, handAngles;
@@ -2454,7 +2476,7 @@ qboolean VR_GetInput(vrInput_t *input)
 			// and its units. This is what the view model hangs off: the
 			// reference calls it calculated_weaponoffset and adds it to the view
 			// origin (rtcw cg_weapons.c, CG_CalculateVRWeaponPosition).
-			if (hand == 1 && (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+			if ((location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
 				&& vr.viewsValid) {
 				float  scale = vr.vr_worldscale->value;
 				XrVector3f head;
@@ -2487,8 +2509,38 @@ qboolean VR_GetInput(vrInput_t *input)
 					off[1] = x * sn + y * c;
 				}
 
-				VectorCopy(off, vr.weaponOffset);
-				vr.weaponOffsetValid = qtrue;
+				VectorCopy(off, vr.handOffset[hand]);
+				vr.handOffsetValid[hand] = qtrue;
+
+				// And the same hand measured from the tracking origin instead of
+				// from the head, which is what VR_PoseToView does for the eyes.
+				// Identical axis mapping, identical scale, identical de-rotation
+				// - the only difference is what it is measured from.
+				{
+					vec3_t track;
+
+					track[0] = -(location.pose.position.z - vr.trackingOrigin.z) * scale;
+					track[1] = -(location.pose.position.x - vr.trackingOrigin.x) * scale;
+					track[2] =  (location.pose.position.y - vr.trackingOrigin.y) * scale;
+
+					if (vr.yawOffset != 0.0f) {
+						const float radians = -vr.yawOffset * (float)M_PI / 180.0f;
+						const float c = cosf(radians);
+						const float sn = sinf(radians);
+						const float x = track[0];
+						const float y = track[1];
+
+						track[0] = x * c - y * sn;
+						track[1] = x * sn + y * c;
+					}
+
+					VectorCopy(track, vr.handTracking[hand]);
+				}
+
+				if (hand == 1) {
+					VectorCopy(off, vr.weaponOffset);
+					vr.weaponOffsetValid = qtrue;
+				}
 
 				// Head height above the floor, in metres. The reference adds
 				// this back after dropping the view origin to the feet, so the
@@ -2498,6 +2550,54 @@ qboolean VR_GetInput(vrInput_t *input)
 				vr.headHeight = head.y;
 			}
 
+			// Roll, for anything drawn on the hand: a rifle held on its side
+			// should appear on its side, and so should the hand holding it. It
+			// does not affect where a shot goes - roll leaves a forward vector
+			// alone - which is why the aim path does without it.
+			//
+			// Taken from the hand's own axes rather than from the forward
+			// vector, which cannot carry roll: vectoangles always returns zero
+			// for it.
+			{
+				XrVector3f  xrUp = { 0.0f, 1.0f, 0.0f };
+				XrVector3f  dir;
+				vec3_t      up, axis[3], full;
+
+				VR_RotateVector(&location.pose.orientation, &xrUp, &dir);
+				up[0] = -dir.z;
+				up[1] = -dir.x;
+				up[2] =  dir.y;
+
+				if (vr.yawOffset != 0.0f) {
+					const float radians = -vr.yawOffset * (float)M_PI / 180.0f;
+					const float c = cosf(radians);
+					const float sn = sinf(radians);
+					const float x = up[0];
+					const float y = up[1];
+
+					up[0] = x * c - y * sn;
+					up[1] = x * sn + y * c;
+				}
+
+				// forward, left, up - the order AnglesToAxis produces and
+				// MatrixToEulerAngles expects.
+				VectorCopy(forward, axis[0]);
+				CrossProduct(up, forward, axis[1]);
+				VectorNormalize(axis[1]);
+				CrossProduct(forward, axis[1], axis[2]);
+				VectorNormalize(axis[2]);
+
+				MatrixToEulerAngles(axis, full);
+				vr.handRoll[hand] = full[ROLL];
+			}
+
+			// The hand's own pose, kept for whatever is drawn on it. The yaw
+			// travels as a lead over the head for the same reason the aim does:
+			// the controller's absolute yaw means nothing to a game the player
+			// can snap turn in.
+			vr.handPitch[hand]   = handAngles[PITCH];
+			vr.handYawLead[hand] = AngleSubtract(handAngles[YAW], input->headYaw);
+
 			if (hand == 0) {
 				input->offhandYaw = handAngles[YAW];
 				input->offhandTracked = qtrue;
@@ -2505,47 +2605,7 @@ qboolean VR_GetInput(vrInput_t *input)
 				input->weaponYaw = handAngles[YAW];
 				input->weaponPitch = handAngles[PITCH];
 				input->weaponTracked = qtrue;
-
-				// Roll as well, for the view model: a rifle held on its side
-				// should appear on its side. It does not affect where a shot
-				// goes - roll leaves a forward vector alone - which is why the
-				// aim path does without it.
-				//
-				// Taken from the hand's own axes rather than from the forward
-				// vector, which cannot carry roll: vectoangles always returns
-				// zero for it.
-				{
-					XrVector3f  xrUp = { 0.0f, 1.0f, 0.0f };
-					XrVector3f  dir;
-					vec3_t      up, axis[3], full;
-
-					VR_RotateVector(&location.pose.orientation, &xrUp, &dir);
-					up[0] = -dir.z;
-					up[1] = -dir.x;
-					up[2] =  dir.y;
-
-					if (vr.yawOffset != 0.0f) {
-						const float radians = -vr.yawOffset * (float)M_PI / 180.0f;
-						const float c = cosf(radians);
-						const float sn = sinf(radians);
-						const float x = up[0];
-						const float y = up[1];
-
-						up[0] = x * c - y * sn;
-						up[1] = x * sn + y * c;
-					}
-
-					// forward, left, up - the order AnglesToAxis produces and
-					// MatrixToEulerAngles expects.
-					VectorCopy(forward, axis[0]);
-					CrossProduct(up, forward, axis[1]);
-					VectorNormalize(axis[1]);
-					CrossProduct(forward, axis[1], axis[2]);
-					VectorNormalize(axis[2]);
-
-					MatrixToEulerAngles(axis, full);
-					vr.weaponRoll = full[ROLL];
-				}
+				vr.weaponRoll = vr.handRoll[hand];
 			}
 		}
 
@@ -2627,20 +2687,63 @@ the view origin to the feet and adds this back, so the weapon hangs at the real
 height of the player's hand instead of at eye level.
 ==================
 */
-qboolean VR_GetWeaponPose(vec3_t offset, vec3_t angles, float *headHeight)
+qboolean VR_GetWeaponPose(vec3_t trackingOffset, vec3_t angles, float *baseYaw)
 {
-	if (!vr.enabled || !vr.weaponAimValid || !vr.weaponOffsetValid) {
+	if (!vr.enabled || !vr.weaponAimValid || !vr.handOffsetValid[1]) {
 		return qfalse;
 	}
 
-	VectorCopy(vr.weaponOffset, offset);
+	// The weapon hand in the play space, exactly as VR_GetHandPose reports the
+	// other one. It used to be the hand relative to the *head*, which is what
+	// the reference uses (calculated_weaponoffset in VrInputDefault.c) - but
+	// theirs is then rotated and has its height replaced by convertFromVR plus
+	// the -64 rebase, which together come to the same thing as measuring from
+	// the tracking origin in the first place.
+	//
+	// Mixing the two is what must not happen. A head-relative offset composed as
+	// though it were play-space leaves the hand at vieworg + R*(hand - head)
+	// while the camera is at vieworg + R*head, so the head's own movement is
+	// counted twice and every hand movement is amplified.
+	VectorCopy(vr.handTracking[1], trackingOffset);
 
 	angles[PITCH] = vr.weaponAimPitch;
 	angles[YAW]   = vr.weaponAimYawLead;
 	angles[ROLL]  = vr.weaponRoll;
 
-	if (headHeight) {
-		*headHeight = vr.headHeight;
+	if (baseYaw) {
+		*baseYaw = vr.baseYaw;
+	}
+
+	return qtrue;
+}
+
+/*
+==================
+VR_GetHandPose
+
+Where one hand is, for something to be drawn on it.
+
+Same convention as VR_GetWeaponPose, and deliberately so - the caller should not
+have to know which hand happens to be holding the weapon. What comes back is the
+*hand*, though, not the weapon: the two handed hold and the per weapon
+adjustment are applied to the weapon's pose and have no business moving the hand
+that is not holding it.
+==================
+*/
+qboolean VR_GetHandPose(int hand, vec3_t trackingOffset, vec3_t angles, float *baseYaw)
+{
+	if (!vr.enabled || hand < 0 || hand > 1 || !vr.handOffsetValid[hand]) {
+		return qfalse;
+	}
+
+	VectorCopy(vr.handTracking[hand], trackingOffset);
+
+	angles[PITCH] = vr.handPitch[hand];
+	angles[YAW]   = vr.handYawLead[hand];
+	angles[ROLL]  = vr.handRoll[hand];
+
+	if (baseYaw) {
+		*baseYaw = vr.baseYaw;
 	}
 
 	return qtrue;

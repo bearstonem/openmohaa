@@ -986,6 +986,138 @@ void CG_ProcessPlayerModel()
 
 /*
 ===============
+CG_VRHandTag
+
+The bone or tag a hand's mesh hangs from, so the model can be moved to put
+*that* where the controller is rather than the model origin.
+
+The two hands want different anchors. The off hand wants its bone, because the
+hand itself is the thing being placed. The weapon hand wants tag_weapon_right,
+because what the player is holding is the gun: the controller is a grip, and
+putting the weapon's own attachment point on it is what makes the gun sit in the
+hand rather than near it.
+
+Every candidate is measured, not just the one taken. Whether an anchor is *at*
+the hand is the whole question and its tag number does not answer it - a
+distance of nearly nothing from the model origin means the tag is unused,
+however successfully it resolved. tag_weapon_left is exactly that trap on this
+model: it resolves, and it anchors nothing, because the first person model never
+carries a weapon in its left hand.
+===============
+*/
+static int CG_VRHandTag(refEntity_t *model, int hand)
+{
+    static const char *const offHand[]  = {"Bip01 L Hand", "tag_weapon_left"};
+    static const char *const weapHand[] = {"tag_weapon_right", "Bip01 R Hand"};
+    static qboolean          reported[2];
+
+    const char *const *candidates = hand ? weapHand : offHand;
+    int                chosen     = -1;
+    int                i;
+
+    //
+    //  Says why, rather than returning -1 in silence. A silent -1 anchors the
+    //  model on its own origin, which looks exactly like an anchor that was
+    //  found and happened to be at the origin - and this cost a whole round trip
+    //  once already, when the weapon hand printed nothing at all and there was
+    //  no way to tell "never called" from "returned early" from "found nothing".
+    //
+    if (!model || !model->tiki || !cgi.Tag_NumForName || hand < 0 || hand > 1) {
+        if (hand >= 0 && hand <= 1 && !reported[hand]) {
+            cgi.Printf("VR: %s anchor unavailable (model %s, tiki %s, Tag_NumForName %s)\n",
+                hand ? "weapon hand" : "off hand",
+                model ? "ok" : "null",
+                (model && model->tiki) ? "ok" : "null",
+                cgi.Tag_NumForName ? "ok" : "null");
+            reported[hand] = qtrue;
+        }
+        return -1;
+    }
+
+    for (i = 0; i < 2; i++) {
+        const int tagNum = cgi.Tag_NumForName(model->tiki, candidates[i]);
+
+        if (!reported[hand] && cgi.TIKI_Orientation) {
+            if (tagNum < 0) {
+                cgi.Printf("VR: %s candidate \"%s\": absent\n",
+                    hand ? "weapon hand" : "off hand", candidates[i]);
+            } else {
+                const orientation_t o = cgi.TIKI_Orientation(model, tagNum);
+
+                cgi.Printf("VR: %s candidate \"%s\": tag %d at %.1f %.1f %.1f (%.1f units out)\n",
+                    hand ? "weapon hand" : "off hand", candidates[i], tagNum,
+                    o.origin[0], o.origin[1], o.origin[2], VectorLength(o.origin));
+            }
+        }
+
+        if (tagNum >= 0 && chosen < 0) {
+            chosen = tagNum;
+        }
+    }
+
+    if (!reported[hand]) {
+        if (chosen < 0) {
+            cgi.Printf("VR: no %s anchor on this model; using the model origin instead\n",
+                hand ? "weapon hand" : "off hand");
+        }
+        reported[hand] = qtrue;
+    }
+
+    return chosen;
+}
+
+/*
+===============
+CG_VRAnchorOnTag
+
+Takes a model whose origin and axes describe where the *hand* should be, and
+rewrites them so it is the named tag that ends up there instead.
+
+The engine composes a tag into the world as (entity.cpp, GetTagPositionAndOrientation):
+
+    world.origin = model.origin + tag.origin through model.axis
+    world.axis   = tag.axis composed with model.axis
+
+so this is that, inverted. An orientation's axes are orthonormal, so undoing the
+tag's rotation is a transpose.
+
+A tagNum of -1 leaves the model where it is, which anchors it on its own origin -
+wrong by however far the animation puts the hand out in front, but visible and
+debuggable rather than absent.
+===============
+*/
+static void CG_VRAnchorOnTag(refEntity_t *model, int tagNum)
+{
+    orientation_t tag;
+    vec3_t        handOrigin, handAxis[3];
+    vec3_t        inverse[3];
+    int           i, j;
+
+    if (tagNum < 0 || !cgi.TIKI_Orientation) {
+        return;
+    }
+
+    VectorCopy(model->origin, handOrigin);
+    AxisCopy(model->axis, handAxis);
+
+    tag = cgi.TIKI_Orientation(model, tagNum);
+
+    for (i = 0; i < 3; i++) {
+        for (j = 0; j < 3; j++) {
+            inverse[i][j] = tag.axis[j][i];
+        }
+    }
+
+    MatrixMultiply(inverse, handAxis, model->axis);
+
+    VectorCopy(handOrigin, model->origin);
+    for (i = 0; i < 3; i++) {
+        VectorMA(model->origin, -tag.origin[i], model->axis[i], model->origin);
+    }
+}
+
+/*
+===============
 CG_VRPlaceViewModel
 
 Puts the first person model where the player's hand is.
@@ -1013,22 +1145,36 @@ placement.
 */
 static qboolean CG_VRPlaceViewModel(refEntity_t *model)
 {
-    vec3_t offset, angles;
-    float  headHeight = 0.0f;
-    float  worldScale;
+    vec3_t trackingOffset, angles;
+    float  baseYaw = 0.0f;
+    vec3_t bodyAngles, bodyAxis[3];
+    int    tagNum;
+    int    i;
 
-    if (!cgi.VR_GetWeaponPose || !cgi.VR_GetWeaponPose(offset, angles, &headHeight)) {
+    if (!cgi.VR_GetWeaponPose || !cgi.VR_GetWeaponPose(trackingOffset, angles, &baseYaw)) {
         return qfalse;
     }
 
-    worldScale = cgi.Cvar_Get("vr_worldscale", "32", 0)->value;
-    if (worldScale <= 0.0f) {
-        worldScale = 32.0f;
-    }
+    //
+    //  Composed exactly the way R_VRComposeView composes the camera, for the
+    //  reason set out at length in CG_VRPlaceOffHandModel: cg.refdef.vieworg is
+    //  not the camera, and anything anchored on it alone is left behind by the
+    //  head's offset within the play space.
+    //
+    //  This path used to add a head-relative offset to vieworg and then correct
+    //  the height by dropping to the feet and adding the measured head height
+    //  back. That is RTCWQuest's way of doing without this composition, and it
+    //  has two failure modes this does not: the weapon slid whenever the head
+    //  turned, and a snap turn left it behind entirely, because a stick turn
+    //  moves the body's frame and a head-relative offset knows nothing about it.
+    //
+    VectorSet(bodyAngles, 0.0f, cg.refdefViewAngles[YAW] - baseYaw, 0.0f);
+    AnglesToAxis(bodyAngles, bodyAxis);
 
-    VectorAdd(cg.refdef.vieworg, offset, model->origin);
-    model->origin[2] -= 64.0f;
-    model->origin[2] += headHeight * worldScale;
+    VectorCopy(cg.refdef.vieworg, model->origin);
+    for (i = 0; i < 3; i++) {
+        VectorMA(model->origin, trackingOffset[i], bodyAxis[i], model->origin);
+    }
 
     angles[YAW] = AngleNormalize360(angles[YAW] + cg.refdefViewAngles[YAW]);
 
@@ -1077,7 +1223,165 @@ static qboolean CG_VRPlaceViewModel(refEntity_t *model)
         VectorMA(model->origin, -off[0], model->axis[1], model->origin);
     }
 
+    //
+    //  model->origin and model->axis now hold where the *hand* should be. Turn
+    //  that into where the model should be, so the grip lands in the hand rather
+    //  than the model origin doing - the same inversion the off hand uses, and
+    //  the reason it stopped needing a large vr_offHandAdjust.
+    //
+    //  tag_weapon_right is preferred over the bone here because it is where the
+    //  weapon is actually attached: anchoring it on the controller puts the
+    //  gun's grip in the player's hand, which is the thing being held.
+    //
+    tagNum = CG_VRHandTag(model, 1);
+    CG_VRAnchorOnTag(model, tagNum);
+
     return qtrue;
+}
+
+/*
+===============
+CG_VRPlaceOffHandModel
+
+Puts a second copy of the view model where the *other* controller is, so the
+hand that is not holding the weapon follows its own controller.
+
+The pose arrives the same way the weapon hand's does and is rebased the same
+way - see CG_VRPlaceViewModel for why the height and the yaw both need work.
+
+What is different is the anchor. The weapon hand gets away with hanging the
+model off its origin because vr_weaponAdjust then corrects for wherever the
+weapon sits within the model. The off hand cannot: the animation puts that hand
+a long way out in front of the model origin, and by a distance that changes with
+the weapon. So the hand's own bone is asked where it is *within* the model and
+that is taken back off, which lands the mesh on the controller whatever the
+animation is doing.
+
+    tagWorld = model.origin + tagLocal.origin through model.axis
+    tagWorld.axis = tagLocal.axis composed with model.axis
+
+so to put the tag at the hand, invert both: the model's axes become the hand's
+with the bone's own rotation taken off, and its origin the hand's position with
+the bone's offset taken back off along those axes.
+
+vr_offHandAdjust is the residual, in the same seven-field form as
+vr_weaponAdjust, because a bone is not a wrist and the difference has to be
+found on the device.
+
+Returns false when there is no headset or that hand is not tracked, and the
+caller does not draw the off hand at all.
+===============
+*/
+static qboolean CG_VRPlaceOffHandModel(refEntity_t *model)
+{
+    vec3_t trackingOffset, angles;
+    float  baseYaw = 0.0f;
+    vec3_t handOrigin, handAxis[3];
+    vec3_t bodyAngles, bodyAxis[3];
+    int    tagNum;
+    int    i;
+
+    if (!cgi.VR_GetHandPose || !cgi.VR_GetHandPose(0, trackingOffset, angles, &baseYaw)) {
+        return qfalse;
+    }
+
+    //
+    //  Composed exactly the way R_VRComposeView composes the camera
+    //  (renderergl1/tr_vr.c), because the hand has to land in the same space the
+    //  camera ends up in.
+    //
+    //  The renderer does not use cg.refdef.vieworg as it stands: it adds the
+    //  head's play space offset to it, rotated into the body's frame. So
+    //  anchoring anything on cg.refdef.vieworg alone leaves it behind by exactly
+    //  that offset - and because the head swings about the neck, every look
+    //  around moves it. That was the "hands drift away when you turn your head".
+    //
+    //  The body's frame is the view yaw with the head's own contribution taken
+    //  back off, which is what baseYaw carries.
+    //
+    VectorSet(bodyAngles, 0.0f, cg.refdefViewAngles[YAW] - baseYaw, 0.0f);
+    AnglesToAxis(bodyAngles, bodyAxis);
+
+    VectorCopy(cg.refdef.vieworg, handOrigin);
+    for (i = 0; i < 3; i++) {
+        VectorMA(handOrigin, trackingOffset[i], bodyAxis[i], handOrigin);
+    }
+
+    //
+    //  No eye-height fudge here. Dropping to the feet and adding the measured
+    //  head height back is how the weapon hand gets by without this composition;
+    //  once the hand is placed in the play space properly its height is already
+    //  right, and doing both would move it twice.
+    //
+    angles[YAW] = AngleNormalize360(angles[YAW] + cg.refdefViewAngles[YAW]);
+
+    {
+        cvar_t *adjust = cgi.Cvar_Get("vr_offHandAdjust", "1,0,0,0,0,0,0", CVAR_ARCHIVE);
+        vec3_t  off = {0.0f, 0.0f, 0.0f};
+        vec3_t  adjustAng = {0.0f, 0.0f, 0.0f};
+        float   adjustScale = 1.0f;
+        vec3_t  baseAxis[3], adjAxis[3];
+
+        if (adjust && adjust->string[0]) {
+            sscanf(adjust->string, "%f,%f,%f,%f,%f,%f,%f",
+                &adjustScale, &off[0], &off[1], &off[2],
+                &adjustAng[PITCH], &adjustAng[YAW], &adjustAng[ROLL]);
+        }
+
+        VectorScale(off, adjustScale, off);
+
+        AnglesToAxis(angles, baseAxis);
+        AnglesToAxis(adjustAng, adjAxis);
+        MatrixMultiply(adjAxis, baseAxis, handAxis);
+
+        // AnglesToAxis gives forward, left, up - so right is -axis[1].
+        VectorMA(handOrigin, off[2], handAxis[0], handOrigin);
+        VectorMA(handOrigin, off[1], handAxis[2], handOrigin);
+        VectorMA(handOrigin, -off[0], handAxis[1], handOrigin);
+    }
+
+    VectorCopy(handOrigin, model->origin);
+    AxisCopy(handAxis, model->axis);
+
+    tagNum = CG_VRHandTag(model, 0);
+    CG_VRAnchorOnTag(model, tagNum);
+
+    return qtrue;
+}
+
+/*
+===============
+CG_VRShowOnlySurface
+
+Leaves one surface of the view model drawn and hides the rest.
+
+The first person model is four surfaces - triggerhand, lefthand, garandhand and
+viewsleeves - so a hand can be drawn on its own without any mesh work. Passing
+NULL hides all four, which is how the weapon hand's copy is told to stop drawing
+the hand that has gone to the other controller.
+
+viewsleeves is deliberately not separable: it is one mesh covering both
+forearms, so it stays with whichever copy asks for it rather than being split.
+===============
+*/
+static void CG_VRShowOnlySurface(refEntity_t *model, const char *keep)
+{
+    static const char *const parts[] = {"triggerhand", "lefthand", "garandhand", "viewsleeves"};
+    int                      i;
+
+    for (i = 0; i < (int)(sizeof(parts) / sizeof(parts[0])); i++) {
+        const int surfaceNum = cgi.Surface_NameToNum(model->tiki, parts[i]);
+
+        if (surfaceNum < 0) {
+            continue;
+        }
+
+        if (keep && !Q_stricmp(parts[i], keep)) {
+            model->surfaces[surfaceNum] &= ~MDL_SURFACE_NODRAW;
+        } else {
+            model->surfaces[surfaceNum] |= MDL_SURFACE_NODRAW;
+        }
+    }
 }
 
 /*
@@ -1095,6 +1399,15 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
     const char    *szTagName;
     int            iAnimFlags;
     qboolean       bThirdPerson = qfalse;
+    //
+    // Added in OPM
+    //
+    //  Set when the view model went to the weapon hand's controller, and to
+    //  whichever of the two left hand surfaces the weapon called for. Together
+    //  they say a second copy should follow the other controller.
+    //
+    qboolean    bVRHandTracked    = qfalse;
+    const char *pszVROffHandSurf  = NULL;
 
     s1 = &cent->currentState;
 
@@ -1573,6 +1886,8 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     if (iSurfaceNum >= 0) {
                         model.surfaces[iSurfaceNum] &= ~MDL_SURFACE_NODRAW;
                     }
+
+                    pszVROffHandSurf = "garandhand";
                 } else {
                     // hide the garand hands
 
@@ -1585,6 +1900,8 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                     if (iSurfaceNum >= 0) {
                         model.surfaces[iSurfaceNum] &= ~MDL_SURFACE_NODRAW;
                     }
+
+                    pszVROffHandSurf = "lefthand";
                 }
             }
 
@@ -1611,7 +1928,24 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
                 //  height rather than at eye level, and rebase its yaw by how
                 //  far the hand leads the head.
                 //
-                if (!CG_VRPlaceViewModel(&model)) {
+                if (CG_VRPlaceViewModel(&model)) {
+                    //
+                    //  The hand that is not holding the weapon belongs on its
+                    //  own controller, so it comes off this copy and is drawn
+                    //  again below at the other hand. The sleeves stay here:
+                    //  they are one mesh across both forearms and cannot be
+                    //  told apart without re-authoring the model.
+                    //
+                    bVRHandTracked = qtrue;
+
+                    if (pszVROffHandSurf) {
+                        const int iOffHandSurf = cgi.Surface_NameToNum(model.tiki, pszVROffHandSurf);
+
+                        if (iOffHandSurf >= 0) {
+                            model.surfaces[iOffHandSurf] |= MDL_SURFACE_NODRAW;
+                        }
+                    }
+                } else {
                     if (cg.snap->ps.stats[STAT_HEALTH] > 0 && !cg_animationviewmodel->integer) {
                         CG_OffsetFirstPersonView(&model, qfalse);
                     }
@@ -1636,6 +1970,26 @@ void CG_ModelAnim(centity_t *cent, qboolean bDoShaderTime)
 
         // add to refresh list
         cgi.R_AddRefEntityToScene(&model, s1->parent);
+
+        //
+        // Added in OPM
+        //
+        //  The off hand, on its own controller. The same model again with
+        //  everything but that one hand hidden, anchored so the hand's own bone
+        //  lands on the controller rather than the model origin.
+        //
+        //  It is a second entity rather than a second pose because the skeleton
+        //  is shared: both copies are the same animation at the same frame, and
+        //  only the transform differs.
+        //
+        if (bVRHandTracked && pszVROffHandSurf) {
+            refEntity_t offHand = model;
+
+            if (CG_VRPlaceOffHandModel(&offHand)) {
+                CG_VRShowOnlySurface(&offHand, pszVROffHandSurf);
+                cgi.R_AddRefEntityToScene(&offHand, s1->parent);
+            }
+        }
     }
 
     CG_UpdateEntityEmitters(s1->number, &model, cent);

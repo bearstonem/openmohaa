@@ -530,9 +530,29 @@ controller is rather than bolted to the middle of the screen.
 Answers false without a headset, and cgame keeps its own placement.
 ====================
 */
-static qboolean CL_VR_GetWeaponPose( vec3_t offset, vec3_t angles, float *headHeight ) {
+static qboolean CL_VR_GetWeaponPose( vec3_t trackingOffset, vec3_t angles, float *baseYaw ) {
 #ifdef USE_OPENXR
-	return VR_GetWeaponPose( offset, angles, headHeight );
+	return VR_GetWeaponPose( trackingOffset, angles, baseYaw );
+#else
+	return qfalse;
+#endif
+}
+
+/*
+====================
+CL_VR_GetHandPose
+
+Hands one controller's pose to cgame, so a hand can be drawn on it. Unlike the
+weapon pose this is the bare hand, with nothing the weapon does to its own aim
+folded in.
+
+Answers false without a headset or for an untracked hand, and cgame does not
+draw that hand at all.
+====================
+*/
+static qboolean CL_VR_GetHandPose( int hand, vec3_t trackingOffset, vec3_t angles, float *baseYaw ) {
+#ifdef USE_OPENXR
+	return VR_GetHandPose( hand, trackingOffset, angles, baseYaw );
 #else
 	return qfalse;
 #endif
@@ -849,6 +869,7 @@ void CL_InitCGameDLL( clientGameImport_t *cgi, clientGameExport_t **cge ) {
 
 	cgi->getConfigStringIdNormalized = CPT_NormalizeConfigstring;
 	cgi->VR_GetWeaponPose            = CL_VR_GetWeaponPose;
+	cgi->VR_GetHandPose              = CL_VR_GetHandPose;
 
 	cgi->fsDebug					= fs_debug;
 	cgi->HudDrawElements			= cls.HudDrawElements;

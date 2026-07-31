@@ -173,12 +173,62 @@ qboolean VR_GetWeaponAim(vec3_t out);
 /*
 Where the weapon hand is, for the view model to hang off.
 
-offset is the hand relative to the head, in engine units and the engine's frame.
-angles carry the controller's pitch and roll and, in YAW, how far the hand leads
-the head. headHeight is the head above the floor in metres, so the caller can
-put the weapon at the player's real hand height rather than at eye level.
+Reports the weapon hand in exactly the frame VR_GetHandPose reports the other
+one - measured from the tracking origin, not from the head - so both hands are
+composed the same way and the long note below applies to both. What is different
+is only the angles: these carry the weapon's aim, so the two handed hold has
+already had its say on them, which is right for the thing being held and wrong
+for the hand that is not holding it.
+
+The reference keeps its equivalent (calculated_weaponoffset) relative to the
+head, but then rotates it and replaces its height in convertFromVR and the -64
+rebase, which comes to the same place by a longer road. Measuring from the
+tracking origin does it in one step. What must never happen is half of each: a
+head-relative offset composed as though it were play-space puts the hand at
+vieworg + R*(hand - head) while the camera is at vieworg + R*head, so the head's
+own movement is counted twice and every hand movement comes out amplified.
 */
-qboolean VR_GetWeaponPose(vec3_t offset, vec3_t angles, float *headHeight);
+qboolean VR_GetWeaponPose(vec3_t trackingOffset, vec3_t angles, float *baseYaw);
+
+/*
+Where one hand is, for something to be drawn on it. hand is 0 for the left and
+1 for the right, which is the order OpenXR's subaction paths are set up in here
+and has nothing to do with which one holds the weapon.
+
+trackingOffset is the hand measured from the **tracking origin**, in engine units
+and the engine's frame - not from the head. That is deliberate and it is the
+whole reason this is not shaped like VR_GetWeaponPose.
+
+The renderer does not take its camera from cg.refdef.vieworg as cgame leaves it.
+R_VRComposeView adds the head's play space offset to it, rotated into the body's
+frame (tr_vr.c). So the camera the player actually looks through is
+
+    vieworg + bodyAxis * headPlaySpaceOffset
+
+and cgame never sees the second term. Anything anchored on cg.refdef.vieworg
+alone is therefore displaced by exactly the head's offset within the play space -
+and since turning the head swings it about the neck, every look around moves it.
+
+Reporting the hand in the play space lets the caller compose it the same way the
+renderer composes the camera, which puts the two in the same place by
+construction:
+
+    bodyAngles = (0, viewYaw - baseYaw, 0)
+    handWorld  = vieworg + bodyAxis * trackingOffset
+
+baseYaw is how much of the head's heading the client has already written into the
+view angles; subtracting it is what leaves the body's frame rather than the
+head's. It is out here because cgame has no other way to know it.
+
+angles carry the controller's own pitch and roll, and in YAW how far the hand
+leads the head. It is the *hand's* pose: the two handed hold and the per weapon
+adjustment move the weapon, not the hand that is not holding it.
+
+False when there is no headset or that hand is not tracked - a controller that
+has been put down keeps its last drawn position rather than snapping to the
+player's feet, so the caller should skip drawing instead of using zeroes.
+*/
+qboolean VR_GetHandPose(int hand, vec3_t trackingOffset, vec3_t angles, float *baseYaw);
 
 // How much of the head's heading the client has already written into the game's
 // view angles. The renderer takes it back off before composing the headset onto
