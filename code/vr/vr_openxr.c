@@ -1082,8 +1082,18 @@ qboolean VR_Init(void)
 	// fill rate is the problem at all: if the frame time falls roughly with the
 	// pixel count, the GPU is the bottleneck and this is the fix; if it barely
 	// moves, the cost is per draw and lies somewhere else entirely.
+	//
+	// That measurement was made and answered: at 0.6 - 36% of the pixels - the
+	// frame came back only 23% cheaper, so the cost was never fill rate. It was
+	// CPU in rend2's back end, and swapping to renderergl1 on gl4es took the eye
+	// from 50-60 ms to 4-6.
+	//
+	// So this is back at 1 and the headset gets its full 1680x1760 per eye. The
+	// cvar stays because it is still the right first question to ask of any frame
+	// time regression, and because it is the cheapest thing to trade if a later
+	// feature wants budget it has not got.
 	{
-		cvar_t     *scaleCvar = VR_TuningCvar("vr_resolutionScale", "0.6");
+		cvar_t     *scaleCvar = VR_TuningCvar("vr_resolutionScale", "1");
 		const float scale = scaleCvar->value;
 
 		if (scale > 0.1f && scale < 1.0f) {
